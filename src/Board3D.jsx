@@ -544,7 +544,9 @@ export const Board = memo(function Board(props) {
         "3D 화면 연결이 끊겼어요. 새로고침하면 같은 경기에 다시 연결해요.",
       );
     };
+    const restored = () => setFailure("");
     canvas.addEventListener("webglcontextlost", lost);
+    canvas.addEventListener("webglcontextrestored", restored);
     return () => {
       saveCamera(camera, controls);
       cancelAnimationFrame(frame);
@@ -553,6 +555,7 @@ export const Board = memo(function Board(props) {
       document.removeEventListener("visibilitychange", visible);
       canvas.removeEventListener("contextmenu", context);
       canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
       canvas.removeEventListener("pointerdown", pointerdown, true);
       canvas.removeEventListener("pointermove", pointermove);
       canvas.removeEventListener("pointerup", pointerup);
