@@ -1,0 +1,25 @@
+{
+  "name": "frontier-fields",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.mjs --dev",
+    "start": "node server/index.mjs",
+    "build": "vite build",
+    "test": "node --test test/*.test.mjs",
+    "game": "node tools/game.mjs",
+    "mcp": "node tools/mcp.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "5.2.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.1.1",
+    "vite": "8.2.2"
+  }
+}

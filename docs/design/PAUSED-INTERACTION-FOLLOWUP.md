@@ -1,0 +1,11 @@
+# Paused-match interaction follow-up
+
+Same FIELDLINE project; user paused live duel before authorizing source work. No generated imagery. Preserve live match through user save before server restart. Test using isolated fixtures/practice, never inspect rival hidden state.
+
+- Out-of-turn routes: allow own move/cancel requests while opponent acts, with no MP/position/attack changes until next own turn. Preserve route order, terrain/ZOC/fog validation and same API rules. Attacks, production and construction remain own-turn only. Pause still freezes game mutations.
+- Trade: negotiation/market transactions and consent independent of active player; territory purchases and unilateral war/denouncement stay own-turn unless explicitly changed. Live requests open a readable dismissible proposal surface immediately; acceptance/rejection/result is scoped and durable across polling, with at most one alert per unique event. Never claim a human will accept.
+- Picking: city model opens civilization; nameplate opens city inspector even for an enemy (only observed public info); own unit on city wins model picking. Nameplates explicitly bypass unit priority. Attack targeting retains priority over inspect behavior.
+- Resource builder: expose matching mine/pasture action in bottom primary actions; shared UI/server issue text for owner, charges, MP, built facility, forts. Building resource facility over farm is explicitly labeled conversion, consumes one charge/all remaining MP, replaces food yield with resource output. One resource per supplied facility per own turn up to population cap.
+- Audio question: existing two-note cue is turn transition on both sides; do not silently change sound preference. New deal notifications get deduplicated cues, no poll-driven replay.
+
+Verify engine and transport authorization/atomicity, queued first-next-turn movement and cancellation, escrow acceptance after ownership changes, durable private notifications, pure pick resolver, mine/farm conversion and exact output. Browser: isolated UI, actual pointer/nameplate precedence, route on opponent turn, incoming deal above another modal, accept/result, mine visible without details, desktop/mobile layout and errors. No implementation completion claim before applicable checks.

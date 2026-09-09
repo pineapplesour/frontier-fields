@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.fieldline/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+AGENTS.md
+CHECKPOINT.md
+WORKPLAN.md
+docs/WORKING-BRIEF.md
