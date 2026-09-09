@@ -17,6 +17,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # The Pages client talks to the optional public relay. Replace this
+      # value with a named tunnel or hosted API for a persistent deployment.
+      VITE_API_BASE: https://collector-split-herein-calculated.trycloudflare.com
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
