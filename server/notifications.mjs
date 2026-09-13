@@ -15,6 +15,7 @@ export const TRADE_NOTICE_STATUSES = Object.freeze([
 const side = (value, allowedEntities) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const result = {};
+  if (typeof value.openBorders === "boolean") result.openBorders = value.openBorders;
   if (Number.isInteger(value.gold) && value.gold >= 0) result.gold = value.gold;
   if (
     value.resources &&

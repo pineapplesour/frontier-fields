@@ -23,6 +23,8 @@ import {
   siegePenalty,
   findRoute,
   validRoute,
+  canCrossBorder,
+  territoryEntryAllowed,
   FACTIONS,
   MARKET,
   landPrice,
@@ -1460,6 +1462,8 @@ export function observe(g, player, now = Date.now()) {
       peaceUntil: g.peaceUntil?.[pair(player, id)] ?? 0,
       relation: relation(g, player, id),
       allianceUntil: g.alliances?.[pair(player, id)] ?? 0,
+      openBordersUntil: g.openBorders?.[`${id}>${player}`] ?? 0,
+      grantedBordersUntil: g.openBorders?.[`${player}>${id}`] ?? 0,
     })),
     // Treaty/relationship labels are public diplomacy, not private scores,
     // geography, inventories or proposals. Every faction gets the same map.
@@ -1497,6 +1501,7 @@ export function observe(g, player, now = Date.now()) {
       return known
         ? {
             ...known,
+            entryAllowed: territoryEntryAllowed(g, player, known),
             visible: seen.has(key(t)),
             explored: true,
             stale: !seen.has(key(t)) && t.owner !== player,
@@ -2131,6 +2136,10 @@ export function submitOrders(
       order.target = { q: raw.target.q, r: raw.target.r };
     }
     if (action === "move") {
+      const destination = view.tiles.find(t => equal(t, order.target));
+      if (!territoryEntryAllowed(view, player, destination) &&
+          !canCrossBorder(view, u, u, order.target))
+        throw new GameError("국경이 닫혀 있어요. 거래로 30턴 국경개방을 받아야 진입할 수 있어요.");
       const path =
         raw.path === undefined ? findRoute(view, u, order.target) : raw.path;
       if (!validRoute(view, u, path, order.target))
@@ -2604,6 +2613,12 @@ function handleMoves(g, scope = living(g)) {
       .filter((m) => {
         if (m.stopped || !m.path[m.index] || m.left <= 0) return false;
         const destination = m.path[m.index];
+        if (!canCrossBorder(g, m.u, m.u, destination)) {
+          m.stopped = true;
+          m.u.order.blocked = true;
+          event(g, [m.u.owner], "국경개방이 없어 예약 이동을 멈췄어요.");
+          return false;
+        }
         return Number.isFinite(
           movementCost({ a: m.u, b: destination }, g),
         );
@@ -3997,10 +4012,13 @@ function resolveSimultaneousRound(g, now) {
     handleActions(g, living(g).filter((u) => u.owner === p), true);
   updateSupply(g, direct);
   growAndProduce(g, direct);
-  // Rule civilizations and the independent factions act once per round.
+  // NPC orders happen during the shared countdown; only settlement happens here.
   const npcSeats = order.filter((id) => !direct.includes(id));
   const extras = [...new Set([...npcSeatIds(g.players), "cs", "barb"])].filter((id) => g.players[id] && !order.includes(id));
-  if (npcSeats.length || extras.length) playNpcs(g, now, [...npcSeats, ...extras]);
+  const npcs = [...npcSeats, ...extras];
+  const unstarted = npcs.filter(id => g.npcPreparedTurns?.[id] !== g.turn);
+  if (unstarted.length) playNpcs(g, now, unstarted, { realtime: true });
+  if (npcs.length) playNpcs(g, now, npcs, { settleOnly: true });
   g.turn++;
   expireProposals(g);
   g.activePlayer = direct[0] ?? order[0];
@@ -4069,8 +4087,9 @@ function checkVictory(g) {
   }
   if (g.phase === "finished") g.deadline = null;
 }
-function playNpcs(g, now, selected = null) {
+function playNpcs(g, now, selected = null, { realtime = false, settleOnly = false } = {}) {
   const savedDeadline = g.deadline;
+  const savedActivePlayer = g.activePlayer;
   g.deadline = null;
   g.internalNpc = true;
   const attempt = (fn) => {
@@ -4093,6 +4112,9 @@ function playNpcs(g, now, selected = null) {
     for (const p of npcIds) {
       g.activePlayer = p;
       g.players[p].ready = false;
+      g.npcPreparedTurns ??= {};
+      if (!realtime && !settleOnly || g.npcPreparedTurns[p] !== g.turn) {
+      g.npcPreparedTurns[p] = g.turn;
       for (const u of g.units.filter((u) => u.owner === p)) {
         resetUnitActions(g, u);
         u.mergedThisTurn = false;
@@ -4103,6 +4125,9 @@ function playNpcs(g, now, selected = null) {
       }
       for (const c of g.cities.filter((c) => c.owner === p))
         c.attackUsed = false;
+      prepayAmmunition(g, p);
+      }
+      if (!settleOnly) {
       let view = observe(g, p, now);
       const guaranteeDecision = npcGuaranteeDecision(view);
       if (guaranteeDecision)
@@ -4114,15 +4139,19 @@ function playNpcs(g, now, selected = null) {
       if (diplomacy)
         attempt(() => transact(g, p, { turn: g.turn, ...diplomacy }, now));
       view = observe(g, p, now);
+      g.npcEconomyTurns ??= {};
+      if (!realtime || g.npcEconomyTurns[p] !== g.turn) {
+      g.npcEconomyTurns[p] = g.turn;
       for (const prod of npcEconomy(view))
         attempt(() =>
           prod.transaction
             ? transact(g, p, { turn: g.turn, ...prod.transaction }, now)
             : submitOrders(g, p, { turn: g.turn, ...prod }, now),
         );
+      }
       view = observe(g, p, now);
       for (const c of view.cities.filter(
-        (c) => c.owner === p && c.hp > 0 && c.wallHp > 0,
+        (c) => c.owner === p && c.hp > 0 && c.wallHp > 0 && !c.attackUsed,
       )) {
         const target = observe(g, p, now)
           .units.filter((u) => u.hostile && distance(u, c) <= 2)
@@ -4147,8 +4176,14 @@ function playNpcs(g, now, selected = null) {
           );
       }
       for (const id of npcTurnOrder(observe(g, p, now)))
-        for (let step = 0; step < 2; step++) {
-          const order = npcUnitOrder(observe(g, p, now), id);
+        for (let step = 0; step < (realtime ? 1 : 2); step++) {
+          let order = npcUnitOrder(observe(g, p, now), id);
+          if (realtime && order?.action === "fortify" && savedDeadline - now > 2000) break;
+          if (realtime && order?.action === "move") {
+            const next = order.path?.[0];
+            if (!next) break;
+            order = { ...order, target: next, path: [next] };
+          }
           if (
             !order ||
             !attempt(() =>
@@ -4157,6 +4192,8 @@ function playNpcs(g, now, selected = null) {
           )
             break;
         }
+      }
+      if (!realtime) {
       handleActions(
         g,
         living(g).filter((u) => u.owner === p),
@@ -4166,8 +4203,9 @@ function playNpcs(g, now, selected = null) {
         updateSupply(g, [p]);
         growAndProduce(g, [p]);
       } else settleLogisticsTurn(g, p);
+      }
     }
-    if (npcIds.includes("barb") && g.turn % 4 === 0)
+    if (!realtime && npcIds.includes("barb") && g.turn % 4 === 0)
       for (const c of g.cities.filter((c) => c.camp && c.hp > 0 && c.owner === "barb" && tileAt(g, c)?.owner === "barb")) {
         if (living(g).filter((u) => u.owner === "barb").length >= 12) break;
         if (!living(g).some((u) => equal(u, c)))
@@ -4182,9 +4220,15 @@ function playNpcs(g, now, selected = null) {
   } finally {
     g.internalNpc = false;
     g.deadline = savedDeadline;
+    g.activePlayer = savedActivePlayer;
   }
 }
 function expireProposals(g) {
+  for (const [permission, until] of Object.entries(g.openBorders ?? {})) {
+    if (until > g.turn) continue;
+    delete g.openBorders[permission];
+    event(g, permission.split(">"), "30턴 국경개방이 만료됐어요. 평시 진입이 제한되며 남은 부대는 철수할 수 있어요.");
+  }
   const expired = (p) =>
     p.expires <= g.turn || (p.kind === "deal" && !dealEntitiesValid(g, p));
   const stale = g.proposals.filter(expired);
@@ -4690,6 +4734,10 @@ export function previewDeal(g, player, raw, now = Date.now()) {
   }
 }
 function announceWar(g, from, to, { triggerGuarantees = true, reason = null } = {}) {
+  if (g.openBorders) {
+    delete g.openBorders[`${from}>${to}`];
+    delete g.openBorders[`${to}>${from}`];
+  }
   const text =
     reason === "guarantee"
       ? `${factionMap(g)[from].name}이 독립보장 의무로 ${factionMap(g)[to].name}과의 전쟁에 참전했습니다.`
@@ -4933,6 +4981,15 @@ function diplomaticAction(g, player, raw) {
   return true;
 }
 export function advanceDue(g, now = Date.now()) {
+  if (!g.internalNpc && !g.paused && g.phase === "planning" && simultaneous(g) &&
+      g.deadline && now < g.deadline && now >= (g.npcNextActionAt ?? g.turnStartedAt + 1000)) {
+    g.npcNextActionAt = now + 1000;
+    beginEffects(g);
+    playNpcs(g, now, null, { realtime: true });
+    updateContacts(g);
+    checkVictory(g);
+    g.revision++;
+  }
   if (
     !g.paused &&
     g.phase === "planning" &&

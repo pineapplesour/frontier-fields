@@ -385,6 +385,10 @@ export function handleDeal(
       [p.give, p.from, p.to],
       [p.receive, p.to, p.from],
     ]) {
+      if (side.openBorders) {
+        g.openBorders ??= {};
+        g.openBorders[`${from}>${to}`] = g.turn + 30;
+      }
       if (!physical)
         for (const id of side.units) {
           const u = g.units.find((u) => u.id === id);
@@ -453,6 +457,8 @@ export function handleDeal(
     fail("기존 제안에 먼저 응답해 주세요.");
   const side = (s) => {
     s ??= {};
+    if (s.openBorders !== undefined && typeof s.openBorders !== "boolean")
+      fail("국경개방 조건은 켜기 또는 끄기로 지정해 주세요.");
     const gold = s.gold ?? 0,
       resources = s.resources ?? {},
       units = s.units ?? [],
@@ -502,6 +508,7 @@ export function handleDeal(
       resourceDestinationCityId: s.resourceDestinationCityId ?? s.toCityId ?? null,
       unitDestinationCityId: s.unitDestinationCityId ?? s.unitToCityId ?? s.destinationCityId ?? null,
       warAgainst: s.warAgainst ?? null,
+      openBorders: s.openBorders === true,
     };
   };
   const p = {
@@ -525,7 +532,7 @@ export function handleDeal(
         !Object.values(s.resources).some(Boolean) &&
         !s.units.length &&
         !s.cities.length &&
-        !s.warAgainst,
+        !s.warAgainst && !s.openBorders,
     )
   ) {
     if (preview)
@@ -604,7 +611,7 @@ export function handleDeal(
       const c = p.assets[id];
       return v + 150 + (c.population ?? 1) * 25 + (c.capital ? 150 : 0);
     }, 0) +
-    (s.warAgainst ? 60 : 0);
+    (s.warAgainst ? 60 : 0) + (s.openBorders ? 30 : 0);
   const additionalGold = Math.max(
     0,
     Math.ceil(

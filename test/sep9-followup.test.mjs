@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {createGame,addUnit,observe,submitOrders,startGame,ready} from "../server/engine.mjs";
+import {createGame,addUnit,observe,submitOrders,startGame,ready,advanceDue} from "../server/engine.mjs";
 import {approachCombatPreview,combatPreview,combatStrength} from "../shared/combat.js";
 import {equal} from "../shared/rules.js";
 
@@ -39,7 +39,7 @@ test("founding a city on hills consumes the settler without flattening the tile"
   assert.ok(g.cities.some(c=>equal(c,s)&&c.owner==="p1"));assert.equal(tile.terrain,"hills");
   assert.ok(!g.units.some(u=>u.id===s.id));
 });
-test("simultaneous NPC settlement executes actual attacks without external-seat authority",()=>{
+test("simultaneous NPC countdown executes actual attacks without external-seat authority",()=>{
   const g=createGame({mode:"duel",rulesVersion:"expansion-v1",turnMode:"simultaneous",now:1000,
     seats:[{id:"p1",controller:"human"},{id:"p2",controller:"human"},{id:"p3",controller:"npc"}]});
   g.units=[];g.cities=[];g.rivers=[];g.wars=["p1|p3"];g.players.p2.connected=true;
@@ -48,7 +48,9 @@ test("simultaneous NPC settlement executes actual attacks without external-seat 
   const a=addUnit(g,"p3","spearman",{q:5,r:5}),b=addUnit(g,"p1","spearman",{q:6,r:5},{hp:1});
   startGame(g,1100);
   assert.throws(()=>submitOrders(g,"p3",{turn:1,orders:[{unitId:a.id,action:"attack",target:{q:6,r:5}}]},1200),/상대 턴/);
-  ready(g,"p1",1,1300);ready(g,"p2",1,1400);
+  advanceDue(g,2100);
+  assert.ok(!g.units.some(u=>u.id===b.id));assert.equal(g.turn,1);
+  ready(g,"p1",1,2200);ready(g,"p2",1,2300);
   assert.ok(!g.units.some(u=>u.id===b.id));assert.equal(a.attackUsed,true);
   assert.equal(g.internalNpc,false);assert.equal(g.turn,2);
 });

@@ -13,6 +13,7 @@ import {
   isCivilian,
   key,
   movementCost,
+  canCrossBorder,
   neighbors,
 } from "../shared/rules.js";
 import { isSupplyOn } from "./economy.mjs";
@@ -1647,8 +1648,9 @@ function processUnitTrade(g, shipment, turn, { isHostile = null } = {}) {
       return changed || delivered;
     }
     const issue = tradeStepIssue(g, unit, next, isHostile);
-    if (issue) {
-      markBlocked(shipment, issue);
+    const closedBorder = !canCrossBorder(g, unit, unit, next);
+    if (issue || closedBorder) {
+      markBlocked(shipment, issue || "국경개방이 필요해요.");
       shipment.tradeMovementLeft = 0;
       shipment.lastMovedTurn = turn;
       unit.movesLeft = 0;
@@ -1763,6 +1765,11 @@ function processShipment(g, shipment, turn, { isHostile = null } = {}) {
     }
     const from = clonePoint(shipment.position);
     const tile = tileMap(g).get(key(next));
+    if (!canCrossBorder(g, carrier ?? { owner: shipment.owner }, from, next)) {
+      markBlocked(shipment, "국경개방이 필요해요.");
+      if (carrier) carrier.movesLeft = 0;
+      return changed;
+    }
     const cost = tile
       ? movementCost(
           { a: from, b: next },

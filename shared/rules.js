@@ -360,6 +360,41 @@ export const formationName = (size) =>
   ({ 1: "단일 부대", 2: "여단 · 2개 합병", 4: "군단 · 4개 합병" })[size] ??
   `기존 편성 · ${size}개 병력`;
 export const edgeKey = (a, b) => [key(a), key(b)].sort().join("|");
+// Directional permission: the territory owner grants the visitor entry.
+// Observations carry entryAllowed only for their own player and known tiles.
+export function territoryEntryAllowed(view, player, tile) {
+  if (!tile?.owner || tile.owner === player) return true;
+  if (typeof tile.entryAllowed === "boolean") return tile.entryAllowed;
+  if (!view.wars && !view.factions) return true; // terrain-only preview
+  const war = tile.owner === "barb" || player === "barb" ||
+    (view.wars ?? []).includes([player, tile.owner].sort().join("|")) ||
+    (Array.isArray(view.factions) && view.factions.some(f => f.id === tile.owner && f.hostile));
+  return !!war || (view.openBorders?.[`${tile.owner}>${player}`] ?? 0) > view.turn;
+}
+export function canCrossBorder(view, unit, from, to) {
+  const tile = view.tiles?.find(t => equal(t, to));
+  if (territoryEntryAllowed(view, unit.owner, tile)) return true;
+  const source = view.tiles?.find(t => equal(t, from));
+  if (source?.owner !== tile.owner) return false;
+  // Existing visitors may withdraw after expiry/peace/ownership changes.
+  // Use known exit tiles only; no hidden ownership is consulted by previews.
+  const exits = view.tiles.filter(t => t.terrain !== "mountain" && t.terrain !== "unknown" &&
+    t.owner !== tile.owner && territoryEntryAllowed(view, unit.owner, t));
+  if (!exits.length) return false;
+  const terrain = new Map(view.tiles.map(t => [key(t), t]));
+  const distances = new Map(exits.map(t => [key(t), 0]));
+  const queue = [...exits];
+  for (let i = 0; i < queue.length; i++) {
+    const current = queue[i];
+    for (const next of neighbors(current)) {
+      const t = terrain.get(key(next));
+      if (!t || t.owner !== tile.owner || t.terrain === "mountain" || t.terrain === "unknown" || distances.has(key(t))) continue;
+      distances.set(key(t), distances.get(key(current)) + 1);
+      queue.push(t);
+    }
+  }
+  return (distances.get(key(to)) ?? Infinity) < (distances.get(key(from)) ?? Infinity);
+}
 /**
  * Cost of entering the destination of an adjacent edge. A river crossing is
  * a fixed three-point movement event, independent of destination terrain.
@@ -411,6 +446,7 @@ export function reachable(tiles, unit, units, playerId, rivers = [], roads = [])
       const tile = terrain.get(key(n));
       if (!tile || tile.terrain === "mountain" || occupied.has(key(n)))
         continue;
+      if (!canCrossBorder(view, unit, current, n)) continue;
       const cost = movementCost({ a: current, b: n }, view);
       if (!Number.isFinite(cost)) continue;
       const spent = Math.min(budget, current.cost + cost);
@@ -451,6 +487,7 @@ export function routeSchedule(
     startControlled = controlled(unit);
   const steps = [];
   for (const point of path) {
+    if (!canCrossBorder(view, unit, current, point)) return { steps: [], turns: 0, valid: false };
     const cost = movementCost({ a: current, b: point }, view);
     if (!Number.isFinite(cost) || distance(current, point) !== 1)
       return { steps: [], turns: 0, valid: false };
@@ -498,6 +535,7 @@ export function validRoute(view, unit, path, target) {
       return false;
     if (!tiles.has(key(p)) || tiles.get(key(p)).terrain === "mountain")
       return false;
+    if (!canCrossBorder(view, unit, previous, p)) return false;
     const occupant = view.units.find((u) => blocksUnit(unit, u) && equal(u, p));
     const city = view.cities?.find(
       (c) => c.owner !== unit.owner && c.hp > 0 && equal(c, p),
@@ -552,6 +590,7 @@ export function findRoute(view, unit, target, avoid = []) {
     for (const n of neighbors(current)) {
       const tile = tiles.get(key(n));
       if (!tile || tile.terrain === "mountain" || blocked.has(key(n))) continue;
+      if (!canCrossBorder(view, unit, current, n)) continue;
       const cost = movementCost({ a: current, b: n }, view);
       if (!Number.isFinite(cost)) continue;
       let ticks = current.ticks,

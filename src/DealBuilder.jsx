@@ -12,10 +12,12 @@ const empty = () => ({
   units: [],
   cities: [],
   warAgainst: null,
+  openBorders: false,
 });
 export function dealItems(side, labels = {}, game = null) {
   return [
     ...(side.gold ? [`${side.gold}G`] : []),
+    ...(side.openBorders ? ["국경개방 30턴"] : []),
     ...(side.food ? [`식량 ${side.food}`] : []),
     ...Object.entries(side.resources)
       .filter(([, n]) => n)
@@ -211,7 +213,7 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
           {Object.entries({
             goods: "골드·자원",
             assets: "도시·유닛",
-            war: "참전",
+            war: "국경·참전",
           }).map(([id, name]) => (
             <button
               key={id}
@@ -312,6 +314,10 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
               </button>
             )),
           )}
+          {s.openBorders ? <button className="offer-chip removable" disabled={disabled}
+            onClick={() => edit(mine, side => ({ ...side, openBorders: false }))}>
+            국경개방 30턴<Icon name="close" size={12} />
+          </button> : null}
           {s.warAgainst ? (
             <button
               className="offer-chip war-term removable"
@@ -504,6 +510,13 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
             </div>
           </div>
           <div hidden={selectedCategory !== "war"}>
+            <button className={`asset-card ${s.openBorders ? "chosen" : ""}`}
+              aria-pressed={s.openBorders} disabled={disabled}
+              onClick={() => edit(mine, side => ({ ...side, openBorders: !side.openBorders }))}>
+              <Icon name="flag" />
+              <span>국경개방 30턴<small>{mine ? "상대가 내 영토에 진입" : "내가 상대 영토에 진입"} · 수락 시 시작</small></span>
+              <Icon name={s.openBorders ? "check" : "plus"} />
+            </button>
             <h4>제3문명 참전 조건</h4>
             <div className="war-inventory">
               {game.factions

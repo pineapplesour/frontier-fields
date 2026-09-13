@@ -416,6 +416,10 @@ export function Civilization({
       {tab === "relations" ? (
         <>
           <PublicRelationsMatrix game={game} faction={f} />
+          {!own && !barbarian && !f.hostile ? <p className="description">
+            상대 영토 진입: {f.openBordersUntil > game.turn ? `${f.openBordersUntil - game.turn}턴 허용` : "국경개방 거래 필요"}
+            {" · "}내 영토 개방: {f.grantedBordersUntil > game.turn ? `${f.grantedBordersUntil - game.turn}턴 남음` : "닫힘"}
+          </p> : null}
           <GuaranteePanel
             game={game}
             faction={f}
