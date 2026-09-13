@@ -74,6 +74,7 @@ export function DetailedLogisticsSetting({ game, busy, onChange }) {
         {state.enabled
           ? "비축 모드 ON · 도시 저장 식량, 유닛 식량과 실제 보급 화물을 사용해요."
           : "비축 모드 OFF · 저장 식량·유닛 식량 없이 턴당 생산−인구 소비 잉여로 성장해요. 기존 연결성·포위 규칙은 유지해요."}
+        {" 초석 턴 유지비는 ON/OFF 모두 적용되며, 부족해도 기존 부대의 공격을 막지 않아요. 신규 생산에는 자원이 필요해요."}
         {!state.canToggle
           ? " 변경은 일시정지 중 방장만 할 수 있어요."
           : " 전환 전 운송 중 화물은 서버가 한 번만 정산해요."}
@@ -929,8 +930,10 @@ function productionOptionCopy(type, definition) {
   return definition?.description ?? "확장 생산 항목";
 }
 
-export function LogisticsProductionOptions({ game, city, disabled, onChoose }) {
-  const [encampmentTarget, setEncampmentTarget] = useState("");
+export function LogisticsProductionOptions({ game, city, disabled, onChoose, encampmentTarget: controlledTarget, onEncampmentTarget, onPickEncampment }) {
+  const [localTarget, setLocalTarget] = useState("");
+  const encampmentTarget = controlledTarget ?? localTarget;
+  const setEncampmentTarget = onEncampmentTarget ?? setLocalTarget;
   const options = productionLogisticsOptions(game, city);
   if (!options.length) return null;
   const inventory = game.economy?.resources ?? {};
@@ -968,6 +971,7 @@ export function LogisticsProductionOptions({ game, city, disabled, onChoose }) {
               </option>
             ))}
           </select>
+          {onPickEncampment ? <button type="button" className="soft-button full" disabled={disabled || !encampmentTargets.length} onClick={onPickEncampment}>지도에서 선택하기</button> : null}
           <small>
             {encampmentTargets.length
               ? "도심 밖 · 현재 관측된 아군 도시 소속 빈 타일"

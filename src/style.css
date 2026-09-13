@@ -140,12 +140,50 @@ small {
 }
 .world-unit-label {
   z-index: 5;
+  min-height: 36px;
 }
+.unit-label-name { font-size: 11px; white-space: nowrap; }
+.stack-picker button { display: inline-flex; align-items: center; gap: 6px; }
+@media (pointer: coarse) { .world-unit-label { min-height: 44px; } }
 .world-labels > span {
   position: absolute;
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
+.world-labels > .map-target-marker {
+  width: 44px;
+  height: 44px;
+  border: 3px solid #1b7354;
+  border-radius: 50%;
+  background: #e8ffdcdd;
+  color: #124b38;
+  font-size: 25px;
+  font-weight: 800;
+  z-index: 8;
+}
+.world-labels > .map-target-marker.picked {
+  background: #ffdf72;
+  border-color: #765511;
+}
+.map-target-toolbar {
+  position: fixed;
+  z-index: 35;
+  left: 50%;
+  top: 94px;
+  transform: translateX(-50%);
+  width: min(600px, calc(100vw - 24px));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: #f5f7ed;
+  border: 2px solid #1b7354;
+  box-shadow: 0 4px 20px #0003;
+}
+.map-target-toolbar span { flex-basis: 100%; }
+.map-target-toolbar button { min-height: 44px; padding: 8px 12px; }
 .route-turn {
   display: flex;
   align-items: center;

@@ -41,6 +41,6 @@ test("resource header separates gross production and recurring upkeep without mo
   e=economy(g,"p1");
   assert.equal(e.resourceUpkeep.niter, 1, "Only living own units contribute");
   const legacy=economy(createGame({mode:"practice",now:1000}),"p1");
-  assert.equal(legacy.resourceUpkeep.niter,0);
+  assert.equal(legacy.resourceUpkeep.niter,2);
   assert.equal(resourceFlow({income:{iron:1}},"iron").signed,"+1");
 });

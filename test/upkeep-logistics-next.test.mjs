@@ -72,11 +72,12 @@ test("shortfall is visible, does not partially debit, and can be retried after t
   assert.equal(blocked.charged, 0);
   assert.equal(blocked.shortfall, 2);
   assert.equal(g.stockpiles.p1.niter, 2);
-  assert.equal(ammunitionPreview(g, unit).ready, false);
+  assert.equal(ammunitionPreview(g, unit).ready, true);
   g.stockpiles.p1.niter = 4;
   const retry = ensureAmmunition(g, unit);
   assert.equal(retry.ready, true);
-  assert.equal(retry.charged, 4);
+  assert.equal(retry.charged, 0, "attacks never settle resources");
+  assert.equal(settleAmmunitionUpkeep(g, "p1").charged, 4);
   assert.equal(settleAmmunitionUpkeep(g, "p1").charged, 0);
   assert.equal(upkeepPreview(g, "p1").entries[0].paid, true);
 });
@@ -106,7 +107,8 @@ test("a merge carries exact paid niter and charges only the unpaid base unit", (
   const merged = mergeAmmunitionUpkeep(g, target, source);
   assert.equal(merged.paidAmount, 1);
   assert.equal(merged.remaining, 1);
-  assert.equal(ensureAmmunition(g, target).charged, 1);
+  assert.equal(ensureAmmunition(g, target).charged, 0);
+  assert.equal(settleAmmunitionUpkeep(g, "p1", { units: [target] }).charged, 1);
   assert.equal(g.stockpiles.p1.niter, 0);
   assert.equal(ensureAmmunition(g, target).charged, 0);
 

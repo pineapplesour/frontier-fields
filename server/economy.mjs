@@ -12,6 +12,7 @@ import {
   isCivilian,
   key,
   productionType,
+  farmTerrainYield,
 } from "../shared/rules.js";
 
 /**
@@ -171,7 +172,7 @@ function farmBase(g, tile) {
       (g.rulesVersion !== "expansion-v1" ||
         assignedCity(g, candidate)?.id === ownerCity?.id),
   ).length;
-  return 1 + finite(tile.fertility) + adjacent;
+  return farmTerrainYield(tile).base + finite(tile.fertility) + adjacent;
 }
 
 function inCityFootprint(g, city, tile) {
@@ -198,6 +199,7 @@ export function citizenSlots(g, city) {
         q: tile.q,
         r: tile.r,
         baseYield: farmBase(g, tile),
+        baseProduction: farmTerrainYield(tile).production,
         bonus: CITIZEN_YIELD_BONUS,
         yield: "food",
       });

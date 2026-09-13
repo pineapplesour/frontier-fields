@@ -351,7 +351,7 @@ export function buildWorld(game) {
       box(p, -0.18, 1.06, -0.12, 0.38, 0.43, 0.41, colors[2]);
       box(p, 0.48, 0, 0.27, 0.39, 0.25, 0.42, colors[1]);
       box(p, -0.47, 0, 0.26, 0.31, 0.33, 0.45, colors[0]);
-    } else if (t.terrain === "hills") {
+    } else if (t.terrain === "hills" && !(t.farm && active)) {
       box(p, -0.3, 0, -0.3, 0.59, 0.22, 0.5, grass);
       box(
         p,
@@ -365,7 +365,18 @@ export function buildWorld(game) {
       );
       box(p, 0.43, 0, 0.28, 0.33, 0.12, 0.36, grass);
     }
-    if (t.farm && active) {
+    if (t.farm && active && t.terrain === "hills") {
+      // Three contour terraces replace the plain field's flat furrows.
+      // This changes farmland geometry only, never actor model altitude.
+      for (let level = 0; level < 3; level++) {
+        const z = -0.36 + level * 0.36;
+        const rise = (2 - level) * 0.14;
+        box(p, 0, 0.003, z, 1.08, rise + 0.075, 0.34, "#8b8067");
+        box(p, 0, rise + 0.076, z, 1.02, 0.035, 0.28, "#b1aa6c");
+        for (let x = -0.42; x < 0.5; x += 0.21)
+          box(p, x, rise + 0.11, z, 0.09, 0.12, 0.17, "#d8bd67");
+      }
+    } else if (t.farm && active) {
       box(p, 0, 0.003, 0, 1.04, 0.04, 1.1, "#a9956d");
       for (let x = -0.39; x <= 0.4; x += 0.26) {
         box(p, x, 0.05, 0, 0.16, 0.035, 1.04, "#c6ad69");

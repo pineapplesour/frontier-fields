@@ -150,8 +150,8 @@ test("combat preview exposes public niter legality, city garrison pool, and wall
     cities: [{ id: "c", owner: "p2", q: 4, r: 3, hp: 100, wallLevel: 0, wallHp: 0 }],
   };
   const noAmmo = combatPreview(cityView, attacker, target);
-  assert.equal(noAmmo.legal, false);
-  assert.ok(noAmmo.reasons.some((reason) => reason.includes("초석 부족")));
+  assert.equal(noAmmo.legal, true);
+  assert.ok(!noAmmo.reasons.some((reason) => reason.includes("초석 부족")));
   assert.equal(noAmmo.garrisonProtected, true);
   assert.equal(noAmmo.cityPool.hp, 100);
   assert.ok(noAmmo.dealtBounds[1] > 0);

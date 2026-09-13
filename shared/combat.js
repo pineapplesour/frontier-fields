@@ -213,10 +213,8 @@ export function ammunitionState(view, unit) {
       ? supplied.available
       : null;
     const paid = supplied.paid === true;
-    const ready =
-      supplied.ready !== false &&
-      !(supplied.shortfall > 0) &&
-      (paid || available == null || available >= cost);
+    // Imported shortage flags describe upkeep; they never prohibit firing.
+    const ready = true;
     return {
       cost,
       ready,
@@ -241,7 +239,7 @@ export function ammunitionState(view, unit) {
   const paid = unit?.upkeepPaidTurn === view?.turn || unit?.ammoPaidTurn === view?.turn;
   return {
     cost,
-    ready: paid || available >= cost,
+    ready: true,
     available,
     shortfall: paid ? 0 : Math.max(0, cost - available),
     paid,

@@ -17,6 +17,7 @@ import {
   productionType,
   cityMaxHealth,
   settlementIssue,
+  farmTerrainYield,
 } from "../shared/rules.js";
 import { combatStrength } from "../shared/combat.js";
 import { fortIssue } from "../shared/structures.js";
@@ -298,7 +299,7 @@ export function Selection({
           tile?.terrain !== "unknown" ? (
           <div className="selection-numbers">
             <span>
-              농지 예상 <b>+{1 + tile.fertility + adjacent}</b>
+              {farmTerrainYield(tile).name} 예상 <b>식량 +{farmTerrainYield(tile).base + tile.fertility + adjacent}{farmTerrainYield(tile).production ? " · 생산 +1" : ""}</b>
             </span>
             <small>인접 농지 {adjacent}칸</small>
           </div>
@@ -713,9 +714,7 @@ export function UnitDetails({
       </p>
       {ammo.available ? (
         <p className={ammo.ready ? "logistics-footnote" : "logistics-footnote logistics-alert"}>
-          {ammo.ready
-            ? `이번 턴 초석 유지비 ${ammo.cost} · 공격 준비됨`
-            : ammo.reason}
+          {ammo.reason ?? `턴당 초석 유지비 ${ammo.cost} · 공격 시 추가 소모 없음 · 부족해도 기존 부대 공격 가능`}
         </p>
       ) : null}
       <div className="detail-grid">
@@ -776,7 +775,7 @@ export function UnitDetails({
                 </div>
                 <div>
                   {tile.farm ? "현재 농지 식량" : "농지 조성 시 식량"}
-                  <strong>+{1 + tile.fertility + adjacentFarms} / 턴</strong>
+                  <strong>+{farmTerrainYield(tile).base + tile.fertility + adjacentFarms} / 턴{farmTerrainYield(tile).production ? " · 구릉지 농지 생산 +1" : ""}</strong>
                 </div>
               </div>
               <p>
@@ -883,7 +882,7 @@ export function UnitDetails({
     </>
   );
 }
-export function Production({ game, city, disabled, onChoose, onTrade, onBuy }) {
+export function Production({ game, city, disabled, onChoose, onTrade, onBuy, encampmentTarget, onEncampmentTarget, onPickEncampment }) {
   const [wallRepairTarget, setWallRepairTarget] = useState("");
   const detailedSupply = detailedLogisticsState(game).enabled;
   const wallRepair = wallRepairEligibility(city, game.turn);
@@ -1114,6 +1113,9 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy }) {
         </>
       ) : null}
       <LogisticsProductionOptions
+        encampmentTarget={encampmentTarget}
+        onEncampmentTarget={onEncampmentTarget}
+        onPickEncampment={onPickEncampment}
         game={game}
         city={city}
         disabled={disabled}
@@ -1161,7 +1163,7 @@ export function Rules() {
       </p>
       <h3>내정과 자원</h3>
       <p>
-        농지 식량은 기본 1 + 비옥도 + 인접한 아군 농지 수예요. 보급 OFF에서는
+        농지 식량은 기본 1 + 비옥도 + 인접한 아군 농지 수예요. 구릉지 농지는 평지보다 식량이 1 적고 도시 생산력을 1 더해요. 보급 OFF에서는
         도시별 생산에서 시민 소비를 뺀 잉여로 성장 진척을 계산하며, 이 진척을
         저장 식량·거래·수송 화물로 취급하지 않아요. 보급 ON에서는 도시 저장
         식량과 유닛별 식량을 따로 사용해요. 도시의 병력 소비 수치는 보급 수요를

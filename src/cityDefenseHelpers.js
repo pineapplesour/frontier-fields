@@ -85,26 +85,22 @@ export function wallRepairEligibility(city, currentTurn) {
 
 /**
  * The server sends an ammunition preview only for observations where ammo is
- * relevant.  Missing preview data keeps legacy attacks usable; an explicit
- * `ready: false` blocks the action and gives the player the server reason.
+ * relevant. Shortfalls are informational: existing troops can attack even
+ * when their per-turn niter upkeep is unpaid. Ignore legacy blocking flags.
  */
 export function attackReadiness(unit) {
   const ammo = unit?.ammunition;
   if (!ammo || typeof ammo !== "object")
     return { available: false, ready: true, reason: null };
   const shortfall = finite(ammo.shortfall, unit.ammoShortfall) ?? 0;
-  const ready = ammo.ready !== false;
+  const ready = true;
   return {
     available: true,
     ready,
     shortfall: Math.max(0, shortfall),
-    reason:
-      ammo.reason ??
-      (ready
-        ? null
-        : shortfall > 0
-          ? `초석 ${shortfall}개가 부족해 공격할 수 없어요.`
-          : "이번 턴 공격 유지비를 확인해 주세요."),
+    reason: shortfall > 0
+      ? `초석 유지비 ${shortfall}개 부족 · 기존 부대는 공격 가능 · 공격 시 추가 소모 없음`
+      : null,
     cost: finite(ammo.cost, unit.ammoCost) ?? 0,
     availableNiter: finite(ammo.available),
   };

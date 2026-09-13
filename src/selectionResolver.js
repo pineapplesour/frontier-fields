@@ -21,6 +21,18 @@ const atPoint = (entities, point) =>
   entities.find((entity) => point?.id && entity.id === point.id) ??
   entities.find((entity) => equal(entity, point));
 
+// Only current public observation actors enter the chooser; remembered
+// contacts never masquerade as units still occupying this tile.
+export function mapSelectionChoices(game, point) {
+  if (!game || !point) return [];
+  return [
+    ...(game.units ?? []).filter((unit) => equal(unit, point))
+      .map((unit) => coordinateSelection(unit, "unit")),
+    ...(game.cities ?? []).filter((city) => equal(city, point))
+      .map((city) => coordinateSelection(city, "city")),
+  ];
+}
+
 /**
  * Resolve a map pick without consulting hidden state.
  *

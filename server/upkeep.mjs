@@ -8,9 +8,8 @@ import { experimentCosts } from "./experiment.mjs";
 /**
  * Turn-scoped ammunition accounting.  A musketeer/artillery base unit pays
  * one niter per size every own turn, whether or not it attacks.  The attack
- * validator may settle that same turn's amount early; the settlement helper
- * then observes the marker and does not charge twice.  This keeps the upkeep
- * rule visible instead of reducing it to an attack-only fee.
+ * action never settles resources and shortage never blocks firing. The
+ * settlement helper observes the marker and does not charge twice.
  */
 export function ammunitionCost(unit) {
   if (!unit || isCivilian(unit) || !["musketeer", "artillery"].includes(unit.type))
@@ -39,55 +38,14 @@ function markPaid(unit, turn, amount, cost) {
 }
 
 export function ensureAmmunition(g, unit) {
-  if (!experimentCosts(g).attack)
-    return { ready: true, cost: 0, charged: 0, shortfall: 0 };
-  const cost = ammunitionCost(unit);
-  if (!cost) return { ready: true, cost: 0, charged: 0, shortfall: 0 };
-  const turn = g.turn;
-  // A successful end-of-turn/own-turn settlement already covers the attack
-  // ammunition for this turn. A formation merge may carry a partial amount,
-  // so charge only the remainder rather than trusting a boolean marker.
-  const paidAmount = g.experiment && !experimentCosts(g).upkeep ? 0 : paidForTurn(unit, cost, turn);
-  const remaining = Math.max(0, cost - paidAmount);
-  if (remaining <= 0)
-    return {
-      ready: true,
-      cost,
-      charged: 0,
-      shortfall: 0,
-      paidAmount,
-      source: unit.upkeepPaidTurn === turn ? "turn-upkeep" : "attack-settlement",
-    };
-  g.stockpiles ??= {};
-  g.stockpiles[unit.owner] ??= {};
-  const available = Number(g.stockpiles?.[unit.owner]?.niter) || 0;
-  if (available < remaining) {
-    unit.ammoShortfall = remaining - available;
-    unit.upkeepShortfallTurn = turn;
-    return {
-      ready: false,
-      cost,
-      charged: 0,
-      shortfall: unit.ammoShortfall,
-      paidAmount,
-      source: "insufficient-niter",
-    };
-  }
-  g.stockpiles[unit.owner].niter = available - remaining;
-  markPaid(unit, turn, paidAmount + remaining, cost);
-  return {
-    ready: true,
-    cost,
-    charged: remaining,
-    shortfall: 0,
-    paidAmount: cost,
-    source: "attack-settlement",
-  };
+  // Compatibility API: old saved shortfall markers are accounting only.
+  // Existing units may always fire; production still checks resource costs.
+  return { ready: true, cost: 0, charged: 0, shortfall: 0 };
 }
 
 export function ammunitionPreview(g, unit) {
-  if (!experimentCosts(g).attack)
-    return { cost: 0, paid: true, ready: true, available: 0, shortfall: 0, description: "실험 모드 · 공격 자원 소모 없음" };
+  if (!experimentCosts(g).upkeep)
+    return { cost: 0, paid: true, ready: true, available: 0, shortfall: 0, description: "실험 모드 · 유지비 없음" };
   const cost = ammunitionCost(unit);
   const paidAmount = g.experiment && !experimentCosts(g).upkeep ? 0 : paidForTurn(unit, cost, g.turn);
   const remaining = Math.max(0, cost - paidAmount);
@@ -96,13 +54,13 @@ export function ammunitionPreview(g, unit) {
   return {
     cost,
     paid,
-    ready: !cost || paid || available >= remaining,
+    ready: true,
     available,
     paidAmount,
     shortfall: paid ? 0 : Math.max(0, remaining - available),
     resource: RESOURCES.niter.name,
     description: cost
-      ? `이번 자기 턴 초석 유지비 ${cost}개 · 부대 규모 ${unit.size ?? 1}`
+      ? `턴당 초석 유지비 ${cost}개 · 부족해도 공격 가능 · 사격 추가 소모 없음`
       : "이 병종은 초석 유지비가 없어요.",
   };
 }

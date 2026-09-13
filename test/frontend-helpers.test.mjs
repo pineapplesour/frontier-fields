@@ -122,15 +122,15 @@ test("city defense display separates body and wall HP and mirrors quiet wall rep
   assert.equal(wallRepairEligibility({ ...city, wallHp: 50 }, 13).eligible, false);
 });
 
-test("explicit ammunition readiness blocks only when the server says it is not ready", () => {
+test("niter shortfalls remain informational even with legacy blocking flags", () => {
   assert.equal(attackReadiness({ type: "spearman" }).ready, true);
   assert.equal(
     attackReadiness({ ammunition: { ready: false, shortfall: 2 } }).ready,
-    false,
+    true,
   );
   assert.match(
     attackReadiness({ ammunition: { ready: false, shortfall: 2 } }).reason,
-    /초석 2개/,
+    /초석 유지비 2개 부족.*공격 가능/,
   );
 });
 

@@ -50,6 +50,7 @@ import {
   MILITARY_FOOD_MULTIPLIER,
   NITER_UPKEEP_PER_UNIT,
   EXPANSION_START_NITER,
+  farmTerrainYield,
 } from "../shared/rules.js";
 import { FORT_HP, fortIssue, structureAt, structureHp, structureWallHp, structureMaxHp, structureKind } from "../shared/structures.js";
 import { encampmentIssue, encampmentCandidates, placeEncampment, recordStructureHit, captureStructure, repairStructure, wallRepairEligibility, beginWallRepair, repairWalls } from "./militaryStructures.mjs";
@@ -112,7 +113,7 @@ import {
   ammunitionCost,
   cityFoodCapacity,
 } from "./economy.mjs";
-import { ensureAmmunition, ammunitionPreview, settleAmmunitionUpkeep, mergeAmmunitionUpkeep } from "./upkeep.mjs";
+import { ammunitionPreview, settleAmmunitionUpkeep, mergeAmmunitionUpkeep } from "./upkeep.mjs";
 import { ensureLogisticsState, tickLogistics, publicLogisticsState, handleLogisticsAction, LOGISTICS_ACTIONS, LogisticsError, onSupplyModeChanged, merchantSummary, mergeUnitLogistics, captureCarrierCargo, demobilizeUnitLogistics, markCarrierDestroyed, createPillageCargo } from "./logistics.mjs";
 
 export class GameError extends Error {
@@ -1131,6 +1132,7 @@ export function visibility(g, player) {
   return seen;
 }
 export function farmYield(g, t, previewOwner = t.owner) {
+  const terrainYield = farmTerrainYield(t);
   const tileCity = isExpansion(g) ? deterministicTileCity(g, t, g.cities)?.id : null;
   const adjacent = neighbors(t).filter((n) => {
     const x = tileAt(g, n);
@@ -1141,10 +1143,10 @@ export function farmYield(g, t, previewOwner = t.owner) {
     );
   }).length;
   return {
-    base: 1,
+    ...terrainYield,
     fertility: t.fertility,
     adjacent,
-    total: 1 + t.fertility + adjacent,
+    total: terrainYield.base + t.fertility + adjacent,
   };
 }
 export function economy(g, player) {
@@ -1216,9 +1218,12 @@ export function economy(g, player) {
     const foodConsumption = civilianFood;
     const foodNet = foodGross - foodConsumption;
     const definition = c.queue ? productionType(c.queue, c) : null;
+    const farmProduction = allocations.get(c.id).reduce(
+      (sum, tile) => sum + farmTerrainYield(tile).production, 0,
+    );
     const productionRate = Math.max(
       1,
-      Math.floor((2 + c.population) * factor) +
+      Math.floor((2 + c.population + farmProduction) * factor) +
         Math.floor(citizens.yields.production * factor),
     );
     const effectiveResourceYields = Object.fromEntries(
@@ -1265,6 +1270,7 @@ export function economy(g, player) {
           : "legacy-food",
       fed: detailedSupply ? foodStock + foodGross >= foodConsumption : foodNet >= 0,
       productionRate,
+      farmProduction,
       growthTarget: growthTarget(c.population),
       growthHalfTarget: growthHalfTarget(c.population),
       growthProgress,
@@ -1343,7 +1349,7 @@ export function economy(g, player) {
     perCity.reduce((sum, city) => sum + (city.citizenBoosts?.gold ?? 0), 0);
   // Recurring upkeep demand, not another debit or a promise of negative stock.
   // Keep gross income unchanged for the settlement and NPC economy consumers.
-  const resourceUpkeep = { iron: 0, horses: 0, niter: isExpansion(g) && experimentCosts(g).upkeep
+  const resourceUpkeep = { iron: 0, horses: 0, niter: experimentCosts(g).upkeep
     ? living(g).filter(u => u.owner === player).reduce((sum, u) => sum + ammunitionCost(u), 0)
     : 0 };
   const netResourceIncome = Object.fromEntries(Object.keys(RESOURCES)
@@ -1528,7 +1534,7 @@ export function observe(g, player, now = Date.now()) {
       .map((u) => ({
         ...publicUnit(u, u.owner === player, g),
         ...(u.owner === player
-          ? { ammunition: isExpansion(g) || isSupplyOn(g) ? ammunitionPreview(g, u) : { ready: true, cost: 0, paid: true, description: "기존 경기 규칙 · 유지비 미적용" }, ...logistics.units.find(entry => entry.id === u.id) }
+          ? { ammunition: ammunitionPreview(g, u), ...logistics.units.find(entry => entry.id === u.id) }
           : {}),
         hostile: atWar(g, player, u.owner),
       })),
@@ -1796,7 +1802,7 @@ export function setSettings(
     const direct = directIds(g);
     if (turnMode === "simultaneous") {
       // Seats that were waiting for their sequential turn join the round now.
-      for (const id of direct) if (id !== g.activePlayer) prepareActiveSeat(g, id);
+      for (const id of direct) if (id !== g.activePlayer) prepareActiveSeat(g, id, { settleUpkeep: false });
       g.activePlayer = direct[0] ?? g.activePlayer;
     } else g.activePlayer = direct.includes(g.activePlayer) ? g.activePlayer : direct[0] ?? g.activePlayer;
     event(g, observerIds(g), turnMode === "simultaneous" ? "방장이 동시 턴으로 바꿨어요. 모두 같은 시간에 행동하고 함께 정산돼요." : "방장이 교대 턴으로 바꿨어요.");
@@ -2779,19 +2785,6 @@ function handleCombat(g, scope = living(g)) {
       !(targetStructure && (structureHp(targetStructure) > 0 || structureWallHp(targetStructure) > 0));
     if (capturing && (u.movesLeft <= 0 || !Number.isFinite(movementCost({from:u,to:target},g)))) continue;
     if (!capturing) {
-    if (isExpansion(g) || isSupplyOn(g)) {
-      const ammo = ensureAmmunition(g, u);
-      if (!ammo.ready) {
-        event(
-          g,
-          [u.owner],
-          `${label(u)} 공격이 보류됐어요 · 초석 ${ammo.shortfall}개가 더 필요해요. 이동·방어는 가능해요.`,
-        );
-        continue;
-      }
-      if (ammo.charged)
-        event(g, [u.owner], `${label(u)} 이번 턴 유지비로 초석 ${ammo.charged}개를 사용했어요.`);
-    }
     u.fortified = false;
     u.fortifyPending = false;
     u.attacksLeft = Math.max(0, (u.attacksLeft ?? (u.attackUsed ? 0 : unitAttacks(u))) - 1);
@@ -3203,7 +3196,7 @@ function handleActions(g, scope = living(g), endTurn = false) {
         event(
           g,
           [u.owner],
-          `${label(u)} 농지를 조성했어요. 식량 +${farmYield(g, t).total}.`,
+          `${label(u)} ${farmTerrainYield(t).name}를 조성했어요. 식량 +${farmYield(g, t).total}${farmTerrainYield(t).production ? ` · 생산 +${farmTerrainYield(t).production}` : ""}.`,
         );
       }
     }
@@ -3537,12 +3530,12 @@ function settleGrowth(g, city, foodNet, owner, values = null) {
 
 function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
   for (const p of owners) {
-    if (isExpansion(g) || isSupplyOn(g)) {
+    {
       const upkeep = settleAmmunitionUpkeep(g, p);
       if (upkeep.charged)
         event(g, [p], `이번 턴 화약 부대 유지비 · 초석 ${upkeep.charged}개를 사용했어요.`);
       if (upkeep.shortfall)
-        event(g, [p], `초석 유지비가 부족해요 · 미납 부대는 초석을 확보하기 전까지 공격할 수 없어요.`);
+        event(g, [p], `초석 유지비가 부족해요 · 기존 부대는 공격 가능하며 신규 생산에는 자원이 필요해요.`);
     }
     const e = economy(g, p);
     g.gold[p] += e.goldIncome;
@@ -3893,7 +3886,7 @@ export function resolveTurn(g, now = Date.now()) {
     g.mode === "practice" && g.activePlayer === "p2" ? now + 3000 : null;
 }
 
-function prepareActiveSeat(g, player) {
+function prepareActiveSeat(g, player, { settleUpkeep = true } = {}) {
   for (const c of g.cities.filter((c) => c.owner === player)) c.attackUsed = false;
   for (const u of g.units.filter((u) => u.owner === player)) {
     delete u.engageTarget;
@@ -3903,22 +3896,21 @@ function prepareActiveSeat(g, player) {
     u.riverTurns = Math.max(0, u.riverTurns - 1);
     if (u.order?.queued) u.order.queued = false;
   }
-  prepayAmmunition(g, player);
+  if (settleUpkeep) prepayAmmunition(g, player);
 }
 /**
  * Powder units pay their once-per-round niter upkeep when their own turn
  * begins. A unit that paid may attack for the rest of that turn even when the
  * stockpile then reads zero; the end-of-turn settlement sees the paid marker
  * and charges nothing twice. Units created later in the turn still settle on
- * their first attack or at the end of the turn.
+ * the end of the turn. Attacks never spend niter or depend on payment.
  */
 function prepayAmmunition(g, player) {
-  if (!(isExpansion(g) || isSupplyOn(g))) return;
   const upkeep = settleAmmunitionUpkeep(g, player);
   if (upkeep.charged)
-    event(g, [player], `턴 시작 · 화약 부대 초석 유지비 ${upkeep.charged}개를 냈어요. 이번 턴 사격 가능.`);
+    event(g, [player], `턴 시작 · 화약 부대 초석 유지비 ${upkeep.charged}개를 냈어요.`);
   if (upkeep.shortfall)
-    event(g, [player], `초석 유지비 ${upkeep.shortfall}개가 부족해요 · 미납 부대는 초석을 확보하기 전까지 공격할 수 없어요.`);
+    event(g, [player], `초석 유지비 ${upkeep.shortfall}개가 부족해요 · 기존 부대는 공격 가능하며 신규 생산에는 자원이 필요해요.`);
 }
 
 function resolveExpansionTurn(g, now) {

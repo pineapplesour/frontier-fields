@@ -517,8 +517,10 @@ test("war-only pillage rewards the attacker and leaves the defender's ruined fac
   assert.equal(economy(g, "p2").perCity[0].farms, 0);
 });
 
-test("niter upkeep is one charge per attacking base unit, blocks empty attacks, and allows later top-up", () => {
-  const g = fixture({ supplyMode: "off" });
+test("attacks never spend niter and existing units fire despite saved upkeep shortfall", () => {
+  for (const supplyMode of ["off", "on", "legacy"]) {
+  const g = fixture({ supplyMode });
+  if (supplyMode === "legacy") { delete g.rulesVersion; g.supplyMode = "off"; }
   city(g, "c1", 3, 3, 2);
   g.wars = ["p1|p2"];
   const target = addUnit(g, "p2", "spearman", { q: 5, r: 3 });
@@ -528,8 +530,7 @@ test("niter upkeep is one charge per attacking base unit, blocks empty attacks, 
     turn: g.turn,
     orders: [{ unitId: artillery.id, action: "bombard", target }],
   });
-  assert.equal(g.stockpiles.p1.niter, 0);
-  assert.equal(artillery.ammoPaidTurn, g.turn);
+  assert.equal(g.stockpiles.p1.niter, 1);
   assert.equal(artillery.attackUsed, true);
   assert.throws(
     () =>
@@ -542,17 +543,41 @@ test("niter upkeep is one charge per attacking base unit, blocks empty attacks, 
 
   const second = addUnit(g, "p1", "artillery", { q: 3, r: 4 });
   const secondTarget = addUnit(g, "p2", "spearman", { q: 5, r: 4 });
-  submitOrders(g, "p1", {
-    turn: g.turn,
-    orders: [{ unitId: second.id, action: "bombard", target: secondTarget }],
-  });
-  assert.equal(second.attackUsed, false);
-  assert.equal(second.ammoShortfall, 1);
-  g.stockpiles.p1.niter = 1;
+  g.stockpiles.p1.niter = 0;
+  second.ammoShortfall = 1;
+  second.upkeepShortfallTurn = g.turn;
   submitOrders(g, "p1", {
     turn: g.turn,
     orders: [{ unitId: second.id, action: "bombard", target: secondTarget }],
   });
   assert.equal(g.stockpiles.p1.niter, 0);
   assert.equal(second.attackUsed, true);
+  }
+});
+
+test("legacy non-supply game charges idle powder upkeep and keeps new-production costs", () => {
+  const g = fixture(); delete g.rulesVersion;
+  const c = city(g, "legacy", 3, 3, 4);
+  addUnit(g, "p1", "musketeer", { q: 4, r: 3 });
+  g.stockpiles.p1.niter = 0;
+  assert.throws(() => submitOrders(g, "p1", { turn: g.turn,
+    production: [{ cityId: c.id, type: "musketeer" }] }), /초석/);
+  g.stockpiles.p1.niter = 8;
+  assert.equal(economy(g, "p1").resourceUpkeep.niter, 1);
+  resolveTurn(g);
+  assert.ok(g.stockpiles.p1.niter < 8, "idle presence consumes niter");
+});
+
+test("new powder units still require construction resources", () => {
+  const g = fixture({ supplyMode: "off" });
+  const c = city(g, "new-production", 3, 3, 4);
+  g.gold.p1 = 10000;
+  g.stockpiles.p1.niter = 0;
+  const purchase = { turn: g.turn, action: "buyUnit", cityId: c.id, type: "musketeer" };
+  assert.throws(() => transact(g, "p1", purchase), /초석/);
+  assert.equal(g.units.length, 0);
+  g.stockpiles.p1.niter = 2;
+  transact(g, "p1", purchase);
+  assert.equal(g.stockpiles.p1.niter, 0);
+  assert.equal(g.units.filter(u => u.type === "musketeer").length, 1);
 });

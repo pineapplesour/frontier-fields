@@ -303,6 +303,7 @@ export function Civilization({
     game.factions.find((f) => f.id !== game.playerId);
   const [confirm, setConfirm] = useState(null),
     [gold, setGold] = useState(40),
+    [deadlineTurns, setDeadlineTurns] = useState(3),
     [resource, setResource] = useState("iron"),
     [amount, setAmount] = useState(1),
     [price, setPrice] = useState(7),
@@ -349,6 +350,7 @@ export function Civilization({
       "alliance",
       "offerTrade",
       "offerDeal",
+      "issueUltimatum",
       "acceptProposal",
       "rejectProposal",
       "cancelProposal",
@@ -441,6 +443,18 @@ export function Civilization({
           </p>
           {!own && !barbarian ? (
             <div className="civ-actions">
+              {!f.hostile && f.relation !== "alliance" && !atPeace ? (
+                <div className="peace-offer">
+                  <label>금 요구 최후통첩 <input aria-label="최후통첩 요구 골드" type="number" min="1" max="10000" value={gold} onChange={e => setGold(Number(e.target.value))} /></label>
+                  <label>응답 기한 <input aria-label="최후통첩 응답 기한" type="number" min="1" max="10" value={deadlineTurns} onChange={e => setDeadlineTurns(Number(e.target.value))} />턴</label>
+                  <button className="soft-button" disabled={tradeDisabled || pending.length > 0 || !Number.isInteger(gold) || gold < 1 || gold > 10000 || !Number.isInteger(deadlineTurns) || deadlineTurns < 1 || deadlineTurns > 10} onClick={async () => {
+                    if (confirm !== "issueUltimatum") { setConfirm("issueUltimatum"); return; }
+                    await onTrade({ action: "issueUltimatum", factionId: f.id, gold, deadlineTurns });
+                    setConfirm(null);
+                  }}>{confirm === "issueUltimatum" ? "최후통첩 발송 확정" : "최후통첩 보내기"}</button>
+                  <p className="fine-print">거절·기한 만료 후 전쟁 선포는 직접 선택해요. 자동 전쟁은 없어요. 규칙 기반 문명은 금 요구를 거절해요.</p>
+                </div>
+              ) : null}
               {f.hostile ? (
                 <label className="peace-offer">
                   제안금{" "}
@@ -537,6 +551,8 @@ export function Civilization({
           <p>
             {p.kind === "deal"
               ? "통합 거래 제안"
+              : p.kind === "ultimatum"
+                ? `금 요구 최후통첩 · ${p.gold}G 지급 요구 · 미응답 시 자동 전쟁 없음`
               : p.kind === "alliance"
                 ? "10턴 동맹"
                 : p.kind === "trade"
@@ -552,7 +568,7 @@ export function Civilization({
                 onTrade({ action: "cancelProposal", proposalId: p.id })
               }
             >
-              제안 취소 · 보관분 반환
+              {p.kind === "ultimatum" ? "최후통첩 철회" : "제안 취소 · 보관분 반환"}
             </button>
           ) : (
             <div className="time-presets">
@@ -562,7 +578,7 @@ export function Civilization({
                   onTrade({ action: "acceptProposal", proposalId: p.id })
                 }
               >
-                수락
+                {p.kind === "ultimatum" ? `${p.gold}G 지급하고 수락` : "수락"}
               </button>
               <button
                 disabled={independentAction("rejectProposal")}

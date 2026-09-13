@@ -9,6 +9,7 @@ import {
   RESOURCE_PER_POP,
 } from "../shared/rules.js";
 import { notifyTrade } from "./notifications.mjs";
+import { handleUltimatum } from "./ultimatums.mjs";
 import { isSupplyOn } from "./economy.mjs";
 import {
   cityFoodCapacity,
@@ -248,6 +249,7 @@ export function handleDeal(
     preview = false,
   },
 ) {
+  if (handleUltimatum(g, player, raw, { GameError, event, atWar, relation })) return true;
   const fail = (text) => {
     throw new GameError(text);
   };

@@ -83,16 +83,16 @@ test("granting current movement after an attack permits real movement without re
   assert.equal(u.q, 6); assert.equal(u.movesLeft, 2); assert.equal(u.attackUsed, true);
 });
 
-test("paused host can edit experiment without advancing time; attack-only mode charges each shot", () => {
+test("paused host can edit experiment without advancing time; shots never charge resources", () => {
   const g = fixture(); const u = addUnit(g, "p1", "musketeer", { q: 5, r: 5 });
   g.paused = true;
   edit(g, u, "unit", { attacks: 3 });
   assert.equal(g.paused, true); assert.equal(g.turn, 1);
   transact(g, "p1", { action: "experimentCosts", turn: g.turn, upkeep: false, attack: true });
   g.stockpiles.p1.niter = 2;
-  assert.equal(ensureAmmunition(g, u).charged, 1);
-  assert.equal(ensureAmmunition(g, u).charged, 1);
-  assert.equal(ensureAmmunition(g, u).ready, false);
+  assert.equal(ensureAmmunition(g, u).charged, 0);
+  assert.equal(ensureAmmunition(g, u).charged, 0);
+  assert.equal(ensureAmmunition(g, u).ready, true);
   assert.equal(settleAmmunitionUpkeep(g, "p1").charged, 0);
 });
 
@@ -101,11 +101,11 @@ test("experiment resource costs default off, toggles take effect, ordinary match
     const g = fixture(experiment);
     const a = addUnit(g, "p1", "musketeer", { q: 5, r: 5 });
     g.stockpiles.p1.niter = 0;
-    assert.equal(ensureAmmunition(g, a).ready, experiment);
+    assert.equal(ensureAmmunition(g, a).ready, true);
     assert.equal(settleAmmunitionUpkeep(g, "p1").shortfall, experiment ? 0 : 1);
     if (experiment) {
       editExperiment(g, { action: "experimentCosts", upkeep: true, attack: true });
-      assert.equal(ensureAmmunition(g, a).ready, false);
+      assert.equal(ensureAmmunition(g, a).ready, true);
       g.stockpiles.p1.niter = 2;
       assert.equal(settleAmmunitionUpkeep(g, "p1").charged, 1);
       assert.equal(ensureAmmunition(g, a).charged, 0);

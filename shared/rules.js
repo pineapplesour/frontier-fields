@@ -314,6 +314,16 @@ export const TERRAINS = {
   hills: { name: "구릉지", cost: 2, defense: 0.2 },
   mountain: { name: "산지", cost: Infinity, defense: 0 },
 };
+// Hill farms exchange one base food for one city production. Fertility,
+// adjacent farms and assigned-citizen bonuses are unchanged.
+export function farmTerrainYield(tile) {
+  const hills = tile?.terrain === "hills";
+  return {
+    base: hills ? 0 : 1,
+    production: hills ? 1 : 0,
+    name: hills ? "구릉지 농지" : "농지",
+  };
+}
 export const DIRECTIONS = [
   [1, 0],
   [1, -1],

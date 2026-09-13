@@ -2,7 +2,7 @@ import { TYPES, equal } from "../shared/rules.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addUnit, createGame, economy, observe, resolveTurn, setSettings, submitOrders, transact } from "../server/engine.mjs";
-import { ensureAmmunition } from "../server/upkeep.mjs";
+import { ensureAmmunition, settleAmmunitionUpkeep } from "../server/upkeep.mjs";
 import { productionLogisticsOptions } from "../src/logisticsHelpers.js";
 
 // Synthetic QA fixtures only. No running match, player observation or save is loaded.
@@ -252,7 +252,7 @@ test("LOGISTICS: merged units conserve personal food and pay only the missing ba
   const receiver = addUnit(g, "p1", "musketeer", { q: 6, r: 3 }, { foodStock: 3 });
   const donor = addUnit(g, "p1", "musketeer", { q: 7, r: 3 }, { foodStock: 2 });
   g.stockpiles.p1.niter = 10;
-  ensureAmmunition(g, receiver);
+  settleAmmunitionUpkeep(g, "p1", { units: [receiver] });
   submitOrders(g, "p1", { turn: g.turn, orders: [{ unitId: donor.id, action: "merge", targetId: receiver.id }] });
   assert.equal(receiver.size, 2);
   assert.equal(receiver.foodStock, 5);

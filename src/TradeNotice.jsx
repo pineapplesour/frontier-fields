@@ -21,6 +21,7 @@ const factionName = (id) => FACTIONS[id]?.name ?? id ?? "알 수 없는 문명";
 
 function proposalDescription(proposal) {
   if (!proposal) return "거래 조건을 확인해 주세요.";
+  if (proposal.kind === "ultimatum") return `금 요구 최후통첩 · ${proposal.gold}G 지급 요구 · ${proposal.expires}턴까지 응답 · 거절·미응답 시 자동 전쟁 없음`;
   if (proposal.kind === "trade")
     return `${RESOURCES[proposal.resource]?.name ?? proposal.resource} ${proposal.amount ?? 0}개 · ${proposal.gold ?? 0}G`;
   if (proposal.kind === "alliance") return "10턴 동맹 제안";
@@ -145,7 +146,7 @@ export function TradeNotice({
           {notice.turn ? `${notice.turn}턴 · ` : ""}
           {factionName(proposal.from)} → {factionName(proposal.to)}
         </small>
-        <strong>{statusNames[notice.status] ?? "거래 알림"}</strong>
+        <strong>{proposal.kind === "ultimatum" ? (statusNames[notice.status] ?? "거래 알림").replace("거래", "금 요구 최후통첩") : statusNames[notice.status] ?? "거래 알림"}</strong>
         <p>{proposalDescription(proposal)}</p>
         {proposal.kind === "deal" ? (
           <DealSummary

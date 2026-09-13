@@ -160,11 +160,11 @@ test("prepaid niter: a powder unit pays at its own turn start and can still fire
   assert.equal(g.stockpiles.p1.niter, 0, "no second charge for the attack");
   resolveTurn(g, 2000);
   assert.equal(g.stockpiles.p1.niter, 0, "end-of-turn settlement does not double charge");
-  // Next own turn with nothing left: the unit is unpaid and cannot fire.
+  // Next own turn with nothing left: unpaid upkeep never prevents firing.
   g.players.p2.ready = true;
   resolveTurn(g, 3000);
   assert.equal(g.activePlayer, "p1");
-  assert.ok(!observe(g, "p1").units.find((u) => u.id === shooter.id).ammunition.ready);
+  assert.ok(observe(g, "p1").units.find((u) => u.id === shooter.id).ammunition.ready);
 });
 
 test("experiment practice spawns own and barbarian units on demand, never in a duel", () => {

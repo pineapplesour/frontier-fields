@@ -9,6 +9,7 @@ import {
   neighbors,
   key,
   TERRAINS,
+  farmTerrainYield,
 } from "../shared/rules.js";
 import { Icon } from "./Icons.jsx";
 import { Modal } from "./Panels.jsx";
@@ -816,12 +817,12 @@ export function TileCompanion({ game, tile }) {
       ) : tile.terrain !== "mountain" && tile.terrain !== "unknown" ? (
         <div
           className="tile-yield"
-          data-tip="농지 식량 = 기본 1 + 비옥도 + 인접한 같은 세력 농지 수. 여섯 방향 인접을 계산해요."
+          data-tip="농지 식량 = 기본 1 + 비옥도 + 인접한 같은 세력 농지 수. 구릉지 농지는 식량 −1, 도시 생산력 +1. 여섯 방향 인접을 계산해요."
         >
           <Icon name="wheat" size={17} />
           <span>
-            {tile.farm ? "농지" : "농지 예상"}{" "}
-            <b>+{1 + tile.fertility + adjacent}</b>
+            {farmTerrainYield(tile).name}{tile.farm ? "" : " 예상"}{" "}
+            <b>식량 +{farmTerrainYield(tile).base + tile.fertility + adjacent}{farmTerrainYield(tile).production ? " · 생산 +1" : ""}</b>
             <small>인접 {adjacent}면</small>
           </span>
         </div>

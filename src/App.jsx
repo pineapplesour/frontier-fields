@@ -44,8 +44,8 @@ import {
 } from "./Panels.jsx";
 import { FeedbackContext } from "./feedback.js";
 import { SaveGames } from "./SaveGames.jsx";
-import { resolveMapSelection } from "./selectionResolver.js";
-import { cityFoodSummary, detailedLogisticsState } from "./logisticsHelpers.js";
+import { resolveMapSelection, mapSelectionChoices } from "./selectionResolver.js";
+import { cityFoodSummary, detailedLogisticsState, encampmentTargetCandidates } from "./logisticsHelpers.js";
 import { canMergeEqualTier } from "./formationHelpers.js";
 import { attackReadiness, cityDefenseSummary } from "./cityDefenseHelpers.js";
 import { estimateCityProduction } from "./productionHelpers.js";
@@ -161,6 +161,9 @@ export default function App() {
   const [layer, setLayer] = useState("terrain");
   const [zoom, setZoom] = useState(() => readCamera()?.zoom ?? 1);
   const [modal, setModal] = useState(null);
+  const [mapPick, setMapPick] = useState(null);
+  const [stackPick, setStackPick] = useState(null);
+  const [encampmentSelection, setEncampmentSelection] = useState({});
   const [newGameSetup, setNewGameSetup] = useState(null);
   const [diplomaticTarget, setDiplomaticTarget] = useState("p2");
   const openCivilization = (id) => {
@@ -208,10 +211,28 @@ export default function App() {
     (game?.activePlayer === game?.playerId && game?.ready);
   const tradeDisabled = planningDisabled;
   const disabled = combatDisabled;
+  const pickCity = game?.cities.find((candidate) => candidate.id === mapPick?.cityId && candidate.owner === game.playerId);
+  const pickCandidates = !pickCity ? [] : mapPick.kind === "growth"
+    ? pickCity.expansionCandidates ?? []
+    : encampmentTargetCandidates(game, pickCity);
+  const finishMapPick = () => {
+    if (pickCity) setSelected({ kind: "city", id: pickCity.id, q: pickCity.q, r: pickCity.r });
+    setModal(mapPick?.returnModal ?? null);
+    setMapPick(null);
+    setMode("inspect");
+  };
+  const startMapPick = (kind) => {
+    setStackPick(null);
+    setMapPick({ kind, cityId: city.id, returnModal: modal, target: null });
+    setMode("mapPick");
+    setModal(null);
+  };
   const clear = useCallback(() => {
     setSelected(null);
     setMode("inspect");
     setPendingShot(null);
+    setMapPick(null);
+    setStackPick(null);
   }, []);
   const promptedProduction = useRef(new Set());
   useEffect(() => {
@@ -221,7 +242,7 @@ export default function App() {
       game.phase !== "planning" ||
       game.paused ||
       busy ||
-      modal
+      modal || mapPick
     )
       return;
     const c = game.cities.find(
@@ -238,7 +259,7 @@ export default function App() {
     );
     setSelected({ kind: "city", id: c.id, q: c.q, r: c.r });
     setModal("production");
-  }, [game, modal, busy, session?.matchId]);
+  }, [game, modal, mapPick, busy, session?.matchId]);
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(""), 3000);
@@ -354,6 +375,17 @@ export default function App() {
   const onTile = useCallback(
     async (point) => {
       if (!point) return;
+      if (mapPick) {
+        if (pickCandidates.some((candidate) => equal(candidate, point)))
+          setMapPick((current) => ({ ...current, target: { q: point.q, r: point.r } }));
+        else setToast("표시된 배치 가능 영토를 선택해 주세요.");
+        return;
+      }
+      setStackPick(null);
+      if (mode === "inspect" && (!point.source || point.source === "body") && mapSelectionChoices(game, point).length > 1) {
+        setStackPick({ q: point.q, r: point.r });
+        return;
+      }
       if (mode === "spawn" && game.experiment && game.playerId === "p1") {
         const ok = await api.transact({
           action: "spawn",
@@ -480,6 +512,8 @@ export default function App() {
       volume,
       pendingShot,
       spawnTool,
+      mapPick,
+      pickCandidates,
     ],
   );
   async function newGame(type, options = {}) {
@@ -601,13 +635,15 @@ export default function App() {
           game={game}
           matchId={session?.matchId}
           selected={unit ?? city ?? selected}
-          unit={unit}
+          unit={mapPick ? null : unit}
           mode={mode}
           onTile={onTile}
           layer={layer}
           zoom={zoom}
           onZoom={setZoom}
-          onClear={clear}
+          onClear={mapPick ? finishMapPick : clear}
+          mapPick={mapPick}
+          pickCandidates={pickCandidates}
           onRoute={onRoute}
           onCancelRoute={() => onAction("cancel")}
           disabled={disabled}
@@ -615,6 +651,37 @@ export default function App() {
           soundEnabled={soundEnabled}
           volume={volume}
         />
+        {mapPick ? (
+          <section className="map-target-toolbar" aria-label="지도에서 영토 선택">
+            <strong>{mapPick.kind === "growth" ? "다음 성장 영토" : "주둔지 배치 영토"}</strong>
+            <span aria-live="polite">{mapPick.target ? `선택: ${mapPick.target.q},${mapPick.target.r}` : `강조된 ${pickCandidates.length}개 영토 중 하나를 누르세요.`}</span>
+            <button disabled={!mapPick.target || disabled || !pickCandidates.some((candidate) => equal(candidate, mapPick.target))} onClick={async () => {
+              if (mapPick.kind === "growth") {
+                if (!await api.citySettings(mapPick.cityId, mapPick.target)) return;
+                setToast("다음 성장 영토를 지정했어요.");
+              } else setEncampmentSelection((current) => ({ ...current, [mapPick.cityId]: `${mapPick.target.q},${mapPick.target.r}` }));
+              finishMapPick();
+            }}>선택 확정</button>
+            <button disabled={!mapPick.target} onClick={() => setMapPick((current) => ({ ...current, target: null }))}>선택 지우기</button>
+            <button onClick={finishMapPick}>취소 · 돌아가기</button>
+          </section>
+        ) : null}
+        {stackPick && !mapPick ? (
+          <section className="map-target-toolbar stack-picker" aria-label="같은 타일의 대상 선택">
+            <strong>{stackPick.q},{stackPick.r} · 선택할 대상</strong>
+            {mapSelectionChoices(game, stackPick).map((choice) => {
+              const entity = (choice.kind === "unit" ? game.units : game.cities).find((item) => item.id === choice.id);
+              return <button key={`${choice.kind}:${choice.id}`} onClick={() => { setSelected(choice); setStackPick(null); }}>
+                {choice.kind === "unit" ? <UnitIcon type={entity.type} /> : <Icon name="city" />}
+                {choice.kind === "unit" ? TYPES[entity.type].name : entity.name}
+                {entity.owner === game.playerId ? " · 내 편" : ""}
+                {choice.kind === "unit" ? ` · 체력 ${entity.hp}` : " · 도시"}
+              </button>;
+            })}
+            <button onClick={() => { setSelected({ kind: "tile", ...stackPick }); setStackPick(null); }}>영토 보기</button>
+            <button onClick={() => setStackPick(null)}>취소</button>
+          </section>
+        ) : null}
         <header className="topbar">
           <button
             className="wordmark"
@@ -664,7 +731,7 @@ export default function App() {
               {Object.entries(RESOURCES).map(([r, d]) => (
                 <button
                   key={r}
-                  data-tip={`${d.name} ${game.economy.resources[r]}/${game.economy.resourceCapacity ?? game.economy.population * 5} · 생산 +${resourceFlow(game.economy, r).gross} − 유지비 ${resourceFlow(game.economy, r).upkeep} = ${resourceFlow(game.economy, r).signed}/턴 · 총인구 × 5 비축 한도. 유지비는 공격하지 않아도 필요하며, 부족한 화약 부대는 공격할 수 없어요. 시작 비축이 한도를 넘으면 기존 수량은 보존해요.`}
+                  data-tip={`${d.name} ${game.economy.resources[r]}/${game.economy.resourceCapacity ?? game.economy.population * 5} · 생산 +${resourceFlow(game.economy, r).gross} − 유지비 ${resourceFlow(game.economy, r).upkeep} = ${resourceFlow(game.economy, r).signed}/턴 · 총인구 × 5 비축 한도. 초석은 화약 부대의 턴 유지비로 소모되고 공격 시 추가 소모는 없어요. 부족해도 기존 부대는 공격하며, 신규 생산에는 자원이 필요해요. 시작 비축이 한도를 넘으면 기존 수량은 보존해요.`}
                   onClick={() => setModal("resources")}
                 >
                   <Icon name={d.icon} size={16} />
@@ -788,7 +855,7 @@ export default function App() {
             }}
           />
         ) : null}
-        {mode !== "inspect" ? (
+        {mode !== "inspect" && !mapPick ? (
           <div className="mode-hint">
             <span>
               {mode === "spawn"
@@ -836,7 +903,7 @@ export default function App() {
             </button>
           ) : null}
         </div>
-        {selected && tile ? (
+        {selected && tile && !mapPick && !stackPick ? (
           <div className="selection-dock">
             {unit || city || contact ? (
               <TileCompanion game={game} tile={tile} />
@@ -1454,6 +1521,7 @@ export default function App() {
                         ))}
                       </select>
                     </label>
+                    <button className="soft-button full" disabled={disabled || !city.expansionCandidates?.length} onClick={() => startMapPick("growth")}>지도에서 선택하기</button>
                     <small>
                       인구 성장 식량 {growthHalfTarget(city.population)}에서 1칸,
                       정수 인구 증가에서 1칸 · 반경 최대 3칸
@@ -1475,6 +1543,9 @@ export default function App() {
             <Production
               game={game}
               city={city}
+              encampmentTarget={encampmentSelection[city.id] ?? ""}
+              onEncampmentTarget={(value) => setEncampmentSelection((current) => ({ ...current, [city.id]: value }))}
+              onPickEncampment={() => startMapPick("encampment")}
               disabled={disabled}
               onTrade={onTrade}
               onChoose={async (type, target = null) => {
