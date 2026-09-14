@@ -137,12 +137,28 @@ function context(view, u) {
   const home = [...cities].sort(
     (a, b) => distance(a, u) - distance(b, u) || stable(a, b),
   )[0];
-  const support = (p) =>
-    allies
+  // Both scores depend only on the hex asked about, and comparator sorts ask
+  // for the same hex many times per unit decision: memoize per hex key.
+  const supportMemo = new Map();
+  const support = (p) => {
+    const k = key(p);
+    if (supportMemo.has(k)) return supportMemo.get(k);
+    const value = allies
       .filter((e) => military(e) && e.id !== u.id && distance(e, p) <= 2)
       .reduce((n, e) => n + power(e) / (1 + distance(e, p)), 0);
+    supportMemo.set(k, value);
+    return value;
+  };
   // Bounded heuristic, not access to enemy orders or unseen terrain/units.
+  const dangerMemo = new Map();
   const danger = (p) => {
+    const k = key(p);
+    if (dangerMemo.has(k)) return dangerMemo.get(k);
+    const value = dangerInner(p);
+    dangerMemo.set(k, value);
+    return value;
+  };
+  const dangerInner = (p) => {
     const defender = {
       ...u,
       ...point(p),

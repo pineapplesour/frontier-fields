@@ -46,10 +46,12 @@ test('NPC reacts to a newly visible opponent during the same turn, only attacks 
   const human=g.units.find(u=>u.owner==='p1');
   advanceDue(g,2000);
   Object.assign(human,{q:npc.q+1,r:npc.r,hp:1});
-  advanceDue(g,3000);
+  // Realtime ticks are round-robin (one NPC faction per second), so give
+  // every faction a chance to act within the same turn.
+  for(let t=3000;t<=8000&&g.units.some(u=>u.id===human.id);t+=1000) advanceDue(g,t);
   assert.ok(!g.units.some(u=>u.id===human.id),'fresh observation catches the approaching enemy');
   const hp=human.hp,ammo=g.stockpiles.p3.niter;
-  advanceDue(g,4000);advanceDue(g,5000);
+  for(let t=9000;t<=14000;t+=1000) advanceDue(g,t);
   assert.equal(human.hp,hp);assert.equal(g.stockpiles.p3.niter,ammo);
   assert.equal(npc.attackUsed,true);
 });

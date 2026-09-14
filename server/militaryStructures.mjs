@@ -155,9 +155,13 @@ export function encampmentIssue(
 
 export function encampmentCandidates(view, city, { radius = 3 } = {}) {
   if (!city || typeof city.owner !== "string") return [];
+  // A tile beyond the radius always fails encampmentIssue (with `cityId`), so
+  // skipping it first only avoids the per-tile lookups; the result set is the
+  // same.  The lookup used to cost 400 x 400 tile scans per city.
   return (view?.tiles ?? [])
     .filter(
       (tile) =>
+        (city.id == null || distance(city, tile) <= radius) &&
         !encampmentIssue(view, city.owner, tile, {
           cityId: city.id,
           radius,

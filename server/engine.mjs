@@ -155,7 +155,9 @@ const other = (p) => (p === "p1" ? "p2" : "p1");
 const tileAt = (g, p) => g.tiles.find((t) => equal(t, p));
 const living = (g) => g.units.filter((u) => u.hp > 0);
 const military = (u) => !isCivilian(u);
-const pair = (a, b) => [a, b].sort().join("|");
+// Same ordering as `[a, b].sort().join("|")` without the array allocation;
+// this key is built millions of times per realtime NPC step.
+const pair = (a, b) => (String(a) <= String(b) ? `${a}|${b}` : `${b}|${a}`);
 const factionMap = (g) => g.factions ?? FACTIONS;
 const factionIds = (g) => Object.keys(factionMap(g));
 const observerIds = (g) =>
@@ -1760,7 +1762,42 @@ export function observe(g, player, now = Date.now()) {
   observation.territorialDiplomacy = territorialDiplomacyView(g, player, observation);
   return observation;
 }
+// Inside an NPC pass every state change flows through engine functions, so a
+// repeated updateContacts with an unchanged world is idempotent and skipped.
+// Outside the pass (tests, restores, direct state edits) it always runs.
+const contactsSignatureCache = new WeakMap();
+function contactsSignature(g) {
+  const parts = [
+    g.turn,
+    Object.keys(g.players).map((p) => `${p}:${g.players[p]?.eliminated ? 1 : 0}`).join(","),
+    JSON.stringify(g.reveals ?? null),
+    JSON.stringify(g.wars ?? null),
+    JSON.stringify(g.territorialPresence ?? null),
+  ];
+  for (const u of g.units)
+    parts.push(`${u.id}|${u.owner}|${u.type}|${u.q}|${u.r}|${u.size}|${u.hp > 0 ? 1 : 0}`);
+  for (const c of g.cities)
+    parts.push(`${c.id}|${c.owner}|${c.name}|${c.q}|${c.r}|${c.population}|${c.wallLevel ?? 0}|${c.camp ? 1 : 0}`);
+  for (const t of g.tiles)
+    parts.push(
+      `${t.owner ?? ""}|${t.terrain}|${t.fertility}|${t.resource ?? ""}|${t.farm ? 1 : 0}|${t.developed ? 1 : 0}|${t.feature ?? ""}|${t.cityId ?? ""}|${t.camp ? 1 : 0}|${t.ruin ? JSON.stringify(t.ruin) : ""}|${t.fort ? JSON.stringify(t.fort) : ""}|${t.encampment ? JSON.stringify(t.encampment) : ""}`,
+    );
+  return parts.join("\n");
+}
 export function updateContacts(g) {
+  let signature = null;
+  if (g.internalNpc) {
+    signature = contactsSignature(g);
+    const last = contactsSignatureCache.get(g);
+    if (
+      last &&
+      last.signature === signature &&
+      last.explored === g.explored &&
+      last.contacts === g.contacts &&
+      last.cityContacts === g.cityContacts
+    )
+      return;
+  }
   g.contacts ??= { p1: {}, p2: {} };
   g.explored ??= {};
   g.cityContacts ??= {};
@@ -1838,6 +1875,15 @@ export function updateContacts(g) {
       cities: g.cities.filter(c => c.owner === player || seen.has(key(c))),
     });
   }
+  // The body updates territorial presence (part of the signature), so the
+  // remembered signature is the post-run one.
+  if (signature !== null)
+    contactsSignatureCache.set(g, {
+      signature: contactsSignature(g),
+      explored: g.explored,
+      contacts: g.contacts,
+      cityContacts: g.cityContacts,
+    });
 }
 function migrateSupplyMode(g, next, player) {
   const current = g.supplyMode ?? SUPPLY_MODES.OFF;
@@ -4147,17 +4193,26 @@ export function supplyNetwork(g, player) {
       .filter((u) => u.owner === player && military(u))
       .map(key),
   );
+  // Hex-key sets replace the per-tile scans over cities and foes.
+  const hostileCityKeys = new Set(
+    g.cities
+      .filter((c) => c.hp > 0 && atWar(g, c.owner, player))
+      .map(key),
+  );
+  const foeKeys = new Set(foes.map(key));
+  const foeAdjacent = new Set();
+  for (const u of foes) for (const n of neighbors(u)) foeAdjacent.add(key(n));
   const passable = new Set(
     g.tiles
-      .filter(
-        (t) =>
-          t.terrain !== "mountain" &&
-          !g.cities.some(
-            (c) => c.hp > 0 && atWar(g, c.owner, player) && equal(c, t),
-          ) &&
-          !foes.some((u) => equal(u, t)) &&
-          (friendly.has(key(t)) || !foes.some((u) => distance(u, t) === 1)),
-      )
+      .filter((t) => {
+        if (t.terrain === "mountain") return false;
+        const k = key(t);
+        return (
+          !hostileCityKeys.has(k) &&
+          !foeKeys.has(k) &&
+          (friendly.has(k) || !foeAdjacent.has(k))
+        );
+      })
       .map(key),
   );
   // Supply comes from a city's accessible hinterland, not an artificial world edge.
@@ -5463,7 +5518,22 @@ export function advanceDue(g, now = Date.now()) {
     g.npcNextActionAt = now + 1000;
     const before = realtimeSignature(g);
     beginEffects(g);
-    playNpcs(g, now, null, { realtime: true });
+    // Realtime steps are spread out: one NPC faction per tick (round robin)
+    // instead of all of them every second, so a single tick never blocks the
+    // event loop for long; a slow step also backs the next tick off.
+    const npcIds = [...npcSeatIds(g.players), "cs", "barb"].filter(
+      (p, i, all) => g.players[p] && !g.players[p].eliminated && all.indexOf(p) === i,
+    );
+    if (npcIds.length) {
+      g.npcRoundRobin = ((g.npcRoundRobin ?? -1) + 1) % npcIds.length;
+      const startedAt = Date.now();
+      playNpcs(g, now, [npcIds[g.npcRoundRobin]], { realtime: true });
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > 150) {
+        g.npcNextActionAt = now + Math.min(4000, 1000 + elapsed * 2);
+        if (process.env.FRONTIER_NPC_DEBUG) console.debug(`[npc] slow realtime step ${npcIds[g.npcRoundRobin]} ${elapsed}ms`);
+      }
+    }
     updateContacts(g);
     checkVictory(g);
     // Only wake clients when the realtime NPC step actually changed something;
