@@ -13,6 +13,7 @@ import {
   blocksUnit,
   isCivilian,
 } from "../shared/rules.js";
+import { mountainBlocksLine } from "../shared/combat.js";
 
 export const worldPoint = ({ q, r }) =>
   new THREE.Vector3(
@@ -377,9 +378,12 @@ export function buildWorld(game) {
           box(p, x, rise + 0.11, z, 0.09, 0.12, 0.17, "#d8bd67");
       }
     } else if (t.farm && active) {
-      box(p, 0, 0.003, 0, 1.04, 0.04, 1.1, "#a9956d");
+      // A farm on a wheat feature is a golden field; ordinary farms keep the
+      // muted straw palette.
+      const wheat = t.feature === "wheat";
+      box(p, 0, 0.003, 0, 1.04, 0.04, 1.1, wheat ? "#b8924a" : "#a9956d");
       for (let x = -0.39; x <= 0.4; x += 0.26) {
-        box(p, x, 0.05, 0, 0.16, 0.035, 1.04, "#c6ad69");
+        box(p, x, 0.05, 0, 0.16, 0.035, 1.04, wheat ? "#d9a93d" : "#c6ad69");
         for (let z = -0.44; z < 0.5; z += 0.2)
           box(
             p,
@@ -387,24 +391,34 @@ export function buildWorld(game) {
             0.085,
             z,
             0.1,
-            0.15 + noise(t.q, t.r, Math.round(z * 10)) * 0.08,
+            (wheat ? 0.19 : 0.15) + noise(t.q, t.r, Math.round(z * 10)) * 0.08,
             0.09,
-            "#e4c576",
+            wheat ? "#f3c94a" : "#e4c576",
           );
+      }
+    } else if (t.feature === "wheat" && !t.resource && !t.fort) {
+      // Wild wheat: golden tufts in a loose ring, not the ordered farm rows.
+      for (let k = 0; k < 7; k++) {
+        const a = (k / 7) * Math.PI * 2 + noise(t.q, t.r, k) * 0.8;
+        const d = 0.22 + noise(t.q, t.r, k + 9) * 0.3;
+        box(
+          p,
+          Math.cos(a) * d,
+          0,
+          Math.sin(a) * d,
+          0.11,
+          active ? 0.2 + noise(t.q, t.r, k + 3) * 0.1 : 0.14,
+          0.11,
+          active ? (k % 2 ? "#e9bd3e" : "#f2d35c") : "#d9d3b6",
+        );
       }
     } else if (
       !places.has(key(t)) &&
       t.terrain === "plains" &&
+      !t.feature &&
       !t.resource &&
       !t.fort
     ) {
-      if (noise(t.q, t.r) > 0.7) {
-        if (active) tree(p, -0.32, -0.22, 0.65);
-        else {
-          box(p, -0.32, 0, -0.22, 0.1, 0.29, 0.1, "#b7c1b1");
-          box(p, -0.32, 0.28, -0.22, 0.38, 0.31, 0.38, "#c4cebd");
-        }
-      }
       if (active)
         for (let k = 0; k < 3; k++)
           box(
@@ -417,6 +431,23 @@ export function buildWorld(game) {
             0.09,
             "#ccdaae",
           );
+    }
+    if (t.feature === "forest" && !t.farm && !t.resource && !(t.fort?.hp > 0)) {
+      // Visible trees mean exactly one thing: a choppable forest feature.
+      // Three trunks per hex keep the canopy readable at map scale.
+      const spots = [
+        [-0.32, -0.22, 0.65],
+        [0.3, 0.18, 0.55],
+        [-0.05, 0.36, 0.45],
+      ];
+      for (const [x, z, sc] of spots) {
+        const jitter = noise(t.q, t.r, Math.round(x * 10 + z * 100)) * 0.1;
+        if (active) tree(p, x + jitter, z - jitter, sc);
+        else {
+          box(p, x, 0, z, 0.1 * sc / 0.65, 0.29 * sc / 0.65, 0.1 * sc / 0.65, "#b7c1b1");
+          box(p, x, 0.28 * sc / 0.65, z, 0.38 * sc / 0.65, 0.31 * sc / 0.65, 0.38 * sc / 0.65, "#c4cebd");
+        }
+      }
     }
     if (t.fort?.hp > 0) {
       const stone = active ? "#a5aea0" : "#c0c9bb";
@@ -811,13 +842,15 @@ export function buildHighlights(game, selected, unit, mode, hover) {
           ? selected?.owner === game.playerId &&
             distance(selected, t) <= 2 &&
             !equal(selected, t) &&
-            t.visible
+            t.visible &&
+            !mountainBlocksLine(game, selected, t)
           : mode === "retreat"
             ? distance(unit, t) === 1 && t.terrain !== "mountain"
             : mode === "attack" || mode === "bombardRelocate"
               ? distance(unit, t) <= TYPES[unit.type].range &&
                 !equal(unit, t) &&
-                (unit.type === "artillery" || t.visible)
+                (unit.type === "artillery" || t.visible) &&
+                !mountainBlocksLine(game, unit, t)
               : false;
   function outline(t, color, opacity = 1) {
     const p = worldPoint(t),
@@ -867,7 +900,8 @@ export function buildHighlights(game, selected, unit, mode, hover) {
         .filter(
           (t) =>
             distance(shooter, t) <= range &&
-            (!shooter.type || shooter.type !== "artillery" ? t.visible : true),
+            (!shooter.type || shooter.type !== "artillery" ? t.visible : true) &&
+            !mountainBlocksLine(game, shooter, t),
         )
         .map(key),
     );

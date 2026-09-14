@@ -276,3 +276,74 @@ test("counter-type advantage deals 2× normal damage, 역상성 deals 0.75×, an
   assert.equal(100 - a.hp, expectedCounter, "counter = 2× advantage × counterMultiplier 0.5");
   assert.equal(expectedCounter, 27);
 });
+
+test("ranged fire cannot cross a mountain: artillery, musketeer range-2 and city wall fire are blocked; far-side mountains and single-hex ties do not block", async () => {
+  const { hexLineCandidates, mountainBlocksLine, rangedTargetIssue, combatPreview, RANGED_MOUNTAIN_BLOCK_MESSAGE } = await import("../shared/combat.js");
+  const { equal, TYPES } = await import("../shared/rules.js");
+  const tile = (g, p) => g.tiles.find((t) => equal(t, p));
+  assert.equal(RANGED_MOUNTAIN_BLOCK_MESSAGE, "산에 가려 사격할 수 없어요.");
+
+  // Straight line (3,2)→(5,2): the single middle hex is (4,2).
+  assert.deepEqual(hexLineCandidates({ q: 3, r: 2 }, { q: 5, r: 2 }), [[{ q: 4, r: 2 }]]);
+  // Line exactly between two hexes: (3,2)→(4,3) passes between (3,3) and (4,2).
+  const tie = hexLineCandidates({ q: 3, r: 2 }, { q: 4, r: 3 });
+  assert.equal(tie.length, 1);
+  assert.equal(tie[0].length, 2);
+  assert.ok(tie[0].some((p) => equal(p, { q: 3, r: 3 })) && tie[0].some((p) => equal(p, { q: 4, r: 2 })));
+  // Adjacent shots have no interior hex.
+  assert.deepEqual(hexLineCandidates({ q: 3, r: 2 }, { q: 4, r: 2 }), []);
+
+  // Artillery: blocked by a middle mountain, illegal at order time and in preview.
+  let g = field();
+  let a = addUnit(g, "p1", "artillery", { q: 3, r: 2 });
+  let b = addUnit(g, "p2", "spearman", { q: 5, r: 2 });
+  tile(g, { q: 4, r: 2 }).terrain = "mountain";
+  assert.equal(mountainBlocksLine(g, a, b), true);
+  assert.equal(rangedTargetIssue(g, a, b), RANGED_MOUNTAIN_BLOCK_MESSAGE);
+  assert.throws(() => command(g, a, "bombard", { target: { q: 5, r: 2 } }), /산에 가려 사격할 수 없어요/);
+  const preview = combatPreview(observe(g, "p1"), a, { ...b, hostile: true });
+  assert.equal(preview.legal, false);
+  assert.ok(preview.reasons.includes(RANGED_MOUNTAIN_BLOCK_MESSAGE));
+  // A mountain adjacent to the target on the far side does not block.
+  tile(g, { q: 4, r: 2 }).terrain = "plains";
+  tile(g, { q: 6, r: 2 }).terrain = "mountain";
+  assert.equal(mountainBlocksLine(g, a, b), false);
+  command(g, a, "bombard", { target: { q: 5, r: 2 } });
+  resolveTurn(g);
+  assert.ok(b.hp < 100, "clear line: bombard lands");
+
+  // Musketeer range-2 fire is blocked the same way; adjacent fire is not.
+  g = field();
+  a = addUnit(g, "p1", "musketeer", { q: 3, r: 2 });
+  b = addUnit(g, "p2", "spearman", { q: 5, r: 2 });
+  tile(g, { q: 4, r: 2 }).terrain = "mountain";
+  assert.equal(TYPES.musketeer.range, 2);
+  assert.throws(() => command(g, a, "attack", { target: { q: 5, r: 2 } }), /산에 가려/);
+  b.q = 4; b.r = 3; // adjacent to (3,2)
+  command(g, a, "attack", { target: { q: 4, r: 3 } });
+
+  // Tie: (3,2)→(4,3) is blocked only when BOTH (3,3) and (4,2) are mountains.
+  g = field();
+  a = addUnit(g, "p1", "artillery", { q: 3, r: 2 });
+  b = addUnit(g, "p2", "spearman", { q: 4, r: 3 });
+  tile(g, { q: 4, r: 2 }).terrain = "mountain";
+  assert.equal(mountainBlocksLine(g, a, b), false);
+  tile(g, { q: 3, r: 3 }).terrain = "mountain";
+  assert.equal(mountainBlocksLine(g, a, b), true);
+
+  // City wall fire (cityBombard) respects the same rule.
+  g = field();
+  const city = { id: "c1", name: "성", owner: "p1", q: 3, r: 2, hp: 100, wallLevel: 1, wallHp: 40, population: 3, attackUsed: false, queue: null };
+  g.cities.push(city);
+  b = addUnit(g, "p2", "spearman", { q: 5, r: 2 });
+  tile(g, { q: 4, r: 2 }).terrain = "mountain";
+  g.activePlayer = "p1";
+  assert.throws(
+    () => submitOrders(g, "p1", { turn: g.turn, orders: [{ cityId: "c1", action: "cityBombard", target: { q: 5, r: 2 } }] }),
+    /산에 가려/,
+  );
+  tile(g, { q: 4, r: 2 }).terrain = "plains";
+  submitOrders(g, "p1", { turn: g.turn, orders: [{ cityId: "c1", action: "cityBombard", target: { q: 5, r: 2 } }] });
+  resolveTurn(g);
+  assert.ok(b.hp < 100, "clear line: city fire lands");
+});

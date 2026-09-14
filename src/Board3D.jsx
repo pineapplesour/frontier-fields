@@ -774,8 +774,16 @@ export const Board = memo(function Board(props) {
           {failure}
         </p>
       ) : null}
-      <div className={`world-labels layer-${layer}`} ref={labels}>
-        {mapPick ? pickCandidates.map((point) => (
+      <div className={`world-labels layer-${layer} ${mapPick?.kind === "merge" ? "merge-pick" : ""}`} ref={labels}>
+        {mapPick?.kind === "merge" ? pickCandidates.map((point) => {
+          const partner = game.units.find((u) => u.id === point.unitId);
+          const name = partner ? TYPES[partner.type].name : "부대";
+          return (
+            <button key={`merge-${point.unitId}`} className="map-target-marker merge-target" data-q={point.q} data-r={point.r} data-alt=".65" aria-label={`${label(point)} ${name}${partner?.size > 1 ? ` ×${partner.size}` : ""} 부대와 합병`} onClick={() => onTile(point)}>
+              <Icon name="merge" size={13} /> {name} 합병
+            </button>
+          );
+        }) : mapPick ? pickCandidates.map((point) => (
           <button key={`pick-${point.q},${point.r}`} className={`map-target-marker ${equal(point, mapPick.target) ? "picked" : ""}`} data-q={point.q} data-r={point.r} data-alt=".65" aria-label={`영토 ${point.q},${point.r} 선택`} aria-pressed={equal(point, mapPick.target)} onClick={() => onTile(point)}>{equal(point, mapPick.target) ? "✓" : `${point.q},${point.r}`}</button>
         )) : null}
         {routePlan.steps
@@ -955,7 +963,7 @@ export const Board = memo(function Board(props) {
         {game.units.map((u) => (
           <button
             key={u.id}
-            className={`world-unit-label ${u.hostile ? "enemy" : ""} ${unit?.id === u.id ? "active" : ""}`}
+            className={`world-unit-label ${u.hostile ? "enemy" : ""} ${unit?.id === u.id ? "active" : ""} ${mapPick?.kind === "merge" && pickCandidates.some((c) => equal(c, u)) ? "pick-candidate" : ""}`}
             data-q={u.q}
             data-r={u.r}
             data-forward=".62"

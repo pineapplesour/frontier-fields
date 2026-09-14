@@ -29,7 +29,7 @@ import { readCamera } from "./cameraPreferences.js";
 import { WarNotice } from "./WarNotice.jsx";
 import { TradeNotice } from "./TradeNotice.jsx";
 import { GuaranteeNotice } from "./GuaranteeNotice.jsx";
-import { playSound, unlockSound } from "./sound.js";
+import { playSound, unlockSound, installSoundUnlock } from "./sound.js";
 import { useGame } from "./useGame.js";
 import { resourceFlow } from "./resourceFlow.js";
 import { Board } from "./Board3D.jsx";
@@ -49,7 +49,7 @@ import { FeedbackContext } from "./feedback.js";
 import { SaveGames } from "./SaveGames.jsx";
 import { resolveMapSelection, mapSelectionChoices } from "./selectionResolver.js";
 import { cityFoodSummary, detailedLogisticsState, encampmentTargetCandidates } from "./logisticsHelpers.js";
-import { canMergeEqualTier } from "./formationHelpers.js";
+import { canMergeEqualTier, mergePartners } from "./formationHelpers.js";
 import { attackReadiness, cityDefenseSummary } from "./cityDefenseHelpers.js";
 import { estimateCityProduction } from "./productionHelpers.js";
 import {
@@ -189,6 +189,9 @@ export default function App() {
     localStorage.setItem("fieldline-sound", soundEnabled ? "on" : "off");
     localStorage.setItem("fieldline-volume", String(volume));
   }, [soundEnabled, volume]);
+  // Resume the audio context on the first pointer/keyboard gesture after
+  // load, whichever element receives it.
+  useEffect(() => installSoundUnlock(window), []);
   const contact =
     selected?.kind === "contact"
       ? game?.contacts?.find((c) => c.id === selected.id)
@@ -215,17 +218,59 @@ export default function App() {
     planningDisabled ||
     (game?.activePlayer === game?.playerId && game?.ready);
   const tradeDisabled = planningDisabled;
+  // Simultaneous rounds settle only when every direct seat is ready (or the
+  // clock runs out), so a seat that pressed ready early may take it back.
+  const canUnready =
+    !!game &&
+    game.turnMode === "simultaneous" &&
+    game.phase === "planning" &&
+    !game.spectator &&
+    !!game.ready;
   const disabled = combatDisabled;
   const pickCity = game?.cities.find((candidate) => candidate.id === mapPick?.cityId && candidate.owner === game.playerId);
-  const pickCandidates = !pickCity ? [] : mapPick.kind === "growth"
-    ? pickCity.expansionCandidates ?? []
-    : encampmentTargetCandidates(game, pickCity);
+  const pickUnit =
+    mapPick?.kind === "merge"
+      ? game?.units.find((candidate) => candidate.id === mapPick.unitId && candidate.owner === game.playerId) ?? null
+      : null;
+  const pickCandidates = mapPick?.kind === "merge"
+    ? mergePartners(game, pickUnit).map((partner) => ({ q: partner.q, r: partner.r, unitId: partner.id }))
+    : !pickCity ? [] : mapPick.kind === "growth"
+      ? pickCity.expansionCandidates ?? []
+      : encampmentTargetCandidates(game, pickCity);
   const finishMapPick = () => {
     if (pickCity) setSelected({ kind: "city", id: pickCity.id, q: pickCity.q, r: pickCity.r });
     setModal(mapPick?.returnModal ?? null);
     setMapPick(null);
     setMode("inspect");
   };
+  // Merge straight from the unit card: highlight adjacent equal-tier partners
+  // on the map and send the merge order as soon as one is picked.
+  const startMergePick = () => {
+    if (!unit) return;
+    setStackPick(null);
+    setMapPick({ kind: "merge", unitId: unit.id, returnModal: null, target: null });
+    setMode("mapPick");
+    setModal(null);
+  };
+  // Map targeting started from a card button leaves focus outside the canvas,
+  // so Escape (any pick) and right-click (merge pick) cancel from anywhere.
+  useEffect(() => {
+    if (!mapPick) return;
+    const cancel = (e) => {
+      if (e.type === "keydown" && e.key !== "Escape") return;
+      if (e.type === "contextmenu") {
+        if (mapPick.kind !== "merge") return;
+        e.preventDefault();
+      }
+      finishMapPick();
+    };
+    window.addEventListener("keydown", cancel);
+    window.addEventListener("contextmenu", cancel, true);
+    return () => {
+      window.removeEventListener("keydown", cancel);
+      window.removeEventListener("contextmenu", cancel, true);
+    };
+  });
   const startMapPick = (kind) => {
     setStackPick(null);
     setMapPick({ kind, cityId: city.id, returnModal: modal, target: null });
@@ -313,11 +358,15 @@ export default function App() {
                     ? "시설을 약탈했어요. 보상이 적용되고 건축자 복구가 필요해요."
                     : action === "repair"
                       ? "시설을 복구했어요."
+                      : action === "chop"
+                        ? "숲을 베었어요. 가까운 내 도시에 생산력이 즉시 더해졌어요."
+                        : action === "harvest"
+                          ? "수확했어요. 식량·자원·생산력이 즉시 더해졌어요."
                 : "이번 턴에 실행했어요.",
       );
       if (
         soundEnabled &&
-        ["farm", "develop", "fort", "found", "scorch", "pillage", "repair"].includes(action)
+        ["farm", "develop", "chop", "harvest", "fort", "found", "scorch", "pillage", "repair"].includes(action)
       )
         playSound("build", volume);
     }
@@ -380,6 +429,25 @@ export default function App() {
   const onTile = useCallback(
     async (point) => {
       if (!point) return;
+      if (mapPick?.kind === "merge") {
+        const candidate = pickCandidates.find((partner) => equal(partner, point));
+        if (!candidate) {
+          setToast("강조된 합병 대상 부대를 선택해 주세요.");
+          return;
+        }
+        const ok = await api.order([
+          { unitId: mapPick.unitId, action: "merge", targetId: candidate.unitId },
+        ]);
+        if (ok) {
+          // The target formation survives the merge; select it so the new
+          // unit stays in focus when the turn resolves.
+          setSelected({ kind: "unit", id: candidate.unitId, q: candidate.q, r: candidate.r });
+          setToast("합병을 예약했어요. 턴이 진행되면 새 편제로 합쳐져요.");
+        }
+        setMapPick(null);
+        setMode("inspect");
+        return;
+      }
       if (mapPick) {
         if (pickCandidates.some((candidate) => equal(candidate, point)))
           setMapPick((current) => ({ ...current, target: { q: point.q, r: point.r } }));
@@ -621,7 +689,12 @@ export default function App() {
         onPointerDown={unlockSound}
       >
         <HelpTip />
-        <WarNotice game={game} soundEnabled={soundEnabled} volume={volume} />
+        <WarNotice
+          game={game}
+          matchId={session?.matchId}
+          soundEnabled={soundEnabled}
+          volume={volume}
+        />
         <TradeNotice
           game={game}
           matchId={session?.matchId}
@@ -659,16 +732,16 @@ export default function App() {
         />
         {mapPick ? (
           <section className="map-target-toolbar" aria-label="지도에서 영토 선택">
-            <strong>{mapPick.kind === "growth" ? "다음 성장 영토" : "주둔지 배치 영토"}</strong>
-            <span aria-live="polite">{mapPick.target ? `선택: ${mapPick.target.q},${mapPick.target.r}` : `강조된 ${pickCandidates.length}개 영토 중 하나를 누르세요.`}</span>
-            <button disabled={!mapPick.target || disabled || !pickCandidates.some((candidate) => equal(candidate, mapPick.target))} onClick={async () => {
+            <strong>{mapPick.kind === "merge" ? "합병 대상 부대" : mapPick.kind === "growth" ? "다음 성장 영토" : "주둔지 배치 영토"}</strong>
+            <span aria-live="polite">{mapPick.kind === "merge" ? `강조된 ${pickCandidates.length}개 부대 중 하나를 누르면 바로 합병 명령을 보내요. Esc·우클릭으로 취소.` : mapPick.target ? `선택: ${mapPick.target.q},${mapPick.target.r}` : `강조된 ${pickCandidates.length}개 영토 중 하나를 누르세요.`}</span>
+            {mapPick.kind === "merge" ? null : <button disabled={!mapPick.target || disabled || !pickCandidates.some((candidate) => equal(candidate, mapPick.target))} onClick={async () => {
               if (mapPick.kind === "growth") {
                 if (!await api.citySettings(mapPick.cityId, mapPick.target)) return;
                 setToast("다음 성장 영토를 지정했어요.");
               } else setEncampmentSelection((current) => ({ ...current, [mapPick.cityId]: `${mapPick.target.q},${mapPick.target.r}` }));
               finishMapPick();
-            }}>선택 확정</button>
-            <button disabled={!mapPick.target} onClick={() => setMapPick((current) => ({ ...current, target: null }))}>선택 지우기</button>
+            }}>선택 확정</button>}
+            {mapPick.kind === "merge" ? null : <button disabled={!mapPick.target} onClick={() => setMapPick((current) => ({ ...current, target: null }))}>선택 지우기</button>}
             <button onClick={finishMapPick}>취소 · 돌아가기</button>
           </section>
         ) : null}
@@ -774,8 +847,9 @@ export default function App() {
                 busy ||
                 game.spectator ||
                 game.paused ||
-                game.ready ||
+                (game.ready && !canUnready) ||
                 (game.phase === "planning" &&
+                  !canUnready &&
                   game.activePlayer !== game.playerId)
               }
               onClick={() =>
@@ -783,14 +857,22 @@ export default function App() {
                   ? setModal("lobby")
                   : game.phase === "finished"
                     ? setModal("result")
-                    : api.ready()
+                    : canUnready
+                      ? api.unready()
+                      : api.ready()
               }
-              data-tip="이번 턴 도시 성장·생산을 정산하고 상대에게 차례를 넘겨요."
+              data-tip={
+                canUnready
+                  ? "다른 문명이 모두 마치기 전이라 턴 종료를 되돌릴 수 있어요."
+                  : "이번 턴 도시 성장·생산을 정산하고 상대에게 차례를 넘겨요."
+              }
             >
               {game.spectator ? "관전 중" : game.phase === "lobby"
                 ? "대기실"
                 : game.phase === "finished"
                   ? "경기 결과"
+                  : canUnready
+                    ? "턴 종료 해제"
                   : game.activePlayer !== game.playerId
                     ? game.turnMode === "simultaneous"
                       ? "대기 중"
@@ -947,7 +1029,7 @@ export default function App() {
                 onClose={clear}
                 onDetails={() => setModal("details")}
                 onProduction={() => setModal("production")}
-                onMerge={() => setModal("merge")}
+                onMerge={startMergePick}
                 onBuyTile={() => setMode("buyTile")}
                 onDiplomacy={openCivilization}
                 onTrade={onTrade}

@@ -21,7 +21,11 @@ export function productionEstimate({ cost, progress = 0, productionRate = 0 }) {
 export function estimateCityProduction(city, type, definition) {
   return productionEstimate({
     cost: definition?.cost,
-    progress: city?.queue === type ? city.production : 0,
+    // A not-yet-queued item starts from the city's banked production.
+    progress:
+      city?.queue === type
+        ? city.production
+        : Math.max(0, Number(city?.storedProduction) || 0),
     productionRate: city?.productionRate,
   });
 }

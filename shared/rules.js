@@ -318,6 +318,28 @@ export const TERRAINS = {
   hills: { name: "구릉지", cost: 2, defense: 0.2 },
   mountain: { name: "산지", cost: Infinity, defense: 0 },
 };
+// Tile features (Civ-style).  A forest can be chopped for an instant
+// production lump; wheat makes a farm on that tile yield extra food and can
+// instead be harvested once for instant food and production.  An undeveloped
+// resource deposit can also be harvested for a one-off stockpile gain, which
+// removes the deposit permanently.
+export const FEATURES = {
+  forest: { name: "숲", description: "건축자가 베면 즉시 생산력을 얻어요." },
+  wheat: { name: "밀밭", description: "농지를 지으면 식량이 늘고, 수확하면 즉시 식량·생산력을 얻어요." },
+};
+export const FOREST_CHANCE = 0.15;
+export const WHEAT_CHANCE = 0.08;
+export const WHEAT_MIN_FERTILITY = 2;
+export const WHEAT_FARM_FOOD_BONUS = 2;
+export const CHOP_PRODUCTION = 20;
+export const HARVEST_FOOD = 10;
+export const HARVEST_PRODUCTION = 10;
+export const HARVEST_RESOURCE_AMOUNT = 3;
+// Production earned while a city builds nothing is banked and applied to
+// the next queued item; completion overflow is banked the same way.
+export const PRODUCTION_BANK_CAP = 100;
+export const wheatFoodBonus = (tile) =>
+  tile?.feature === "wheat" ? WHEAT_FARM_FOOD_BONUS : 0;
 // Hill farms exchange one base food for one city production. Fertility,
 // adjacent farms and assigned-citizen bonuses are unchanged.
 export function farmTerrainYield(tile) {

@@ -222,6 +222,7 @@ export function useGame() {
         production: [{ cityId, type, ...(target ? { target } : {}) }],
       }),
     ready: () => action("ready", { turn: game.turn }),
+    unready: () => action("unready", { turn: game.turn }),
     start: () => action("start", {}),
     settings: (value) =>
       action(

@@ -716,7 +716,10 @@ export function handleDeal(
     if (human(g, to))
       return {
         status: "human",
-        message: "사람이 조종하는 상대예요. 직접 수락해야 성립해요.",
+        message:
+          g.players?.[to]?.controller === "agent"
+            ? "대화형 에이전트(Claude)가 직접 조종하는 상대예요. 제안을 보내면 상대가 자기 차례에 직접 수락하거나 거절해요."
+            : "사람이 조종하는 상대예요. 직접 수락해야 성립해요.",
         additionalGold: null,
         wouldAccept: null,
         never: false,

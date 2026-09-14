@@ -184,6 +184,8 @@ const tools = [
                   "bombard",
                   "farm",
                   "develop",
+                  "chop",
+                  "harvest",
                   "pillage",
                   "scorch",
                   "repair",
@@ -409,6 +411,17 @@ const tools = [
     },
   },
   {
+    name: "game_unready",
+    description:
+      "Simultaneous mode only: cancel your ready state before the round settles (while other direct seats are still acting and the countdown has not ended). Afterwards orders and transactions are accepted again as normal.",
+    inputSchema: {
+      type: "object",
+      properties: { turn: { type: "integer" } },
+      required: ["turn"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "game_wait",
     description:
       "Wait at most 25 seconds for a new revision. Returns current player-scoped observation. No busy polling.",
@@ -509,6 +522,12 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
         });
       else if (params.name === "game_ready")
         result = await request(base, `${route}/ready`, {
+          token: credential,
+          method: "POST",
+          body: a,
+        });
+      else if (params.name === "game_unready")
+        result = await request(base, `${route}/unready`, {
           token: credential,
           method: "POST",
           body: a,

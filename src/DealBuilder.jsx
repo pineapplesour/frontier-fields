@@ -67,9 +67,17 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
     peace,
     detailedSupply,
     factionId: faction.id,
-    revision: game.revision,
+    // Re-quote per turn, not per revision: realtime NPC steps bump the
+    // revision every second and made the verdict flicker while refetching.
+    turn: game.turn,
   });
-  const currentQuote = quote?.key === termsKey ? quote : null;
+  // Keep showing the previous quote for the same faction while a new one loads.
+  const currentQuote =
+    quote?.key === termsKey
+      ? quote
+      : quote?.factionId === faction.id && quote?.status !== "unavailable"
+        ? { ...quote, stale: true }
+        : null;
   const foodBlocked = !detailedSupply && (give.food > 0 || receive.food > 0);
   const sideEmpty = (s) =>
     !s.gold &&
@@ -92,7 +100,7 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
           { factionId: faction.id, give, receive, alliance, peace },
           controller.signal,
         );
-        if (!controller.signal.aborted) setQuote({ ...result, key: termsKey });
+        if (!controller.signal.aborted) setQuote({ ...result, key: termsKey, factionId: faction.id });
       } catch (error) {
         if (!controller.signal.aborted)
           setQuote({

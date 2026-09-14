@@ -6,6 +6,7 @@ import {
   observe,
   submitOrders,
   ready,
+  unready,
   advanceDue,
   startGame,
   GameError,
@@ -255,8 +256,35 @@ export function createApi({
     req.player = player;
     next();
   };
+  // Observation cache: the same (match, player, revision) always yields the
+  // same view except for the clock fields, so polling clients are served the
+  // cached object with a fresh serverTime instead of rebuilding ~200 KB.
+  const observeCache = new Map();
+  const cachedObserve = (match, player, at) => {
+    const g = match.game;
+    const key = `${match.matchId ?? ""}|${player}`;
+    const hit = observeCache.get(key);
+    if (
+      hit &&
+      hit.revision === g.revision &&
+      hit.paused === !!g.paused &&
+      hit.deadline === (g.deadline ?? null) &&
+      hit.game === g
+    )
+      return { ...hit.view, serverTime: at };
+    const view = observe(g, player, at);
+    observeCache.set(key, {
+      revision: g.revision,
+      paused: !!g.paused,
+      deadline: g.deadline ?? null,
+      game: g,
+      view,
+    });
+    if (observeCache.size > 512) observeCache.delete(observeCache.keys().next().value);
+    return view;
+  };
   app.get("/api/matches/:id", authenticated, (req, res) =>
-    res.json(observe(req.match.game, req.player, now())),
+    res.json(cachedObserve(req.match, req.player, now())),
   );
   app.post("/api/matches/:id/save", authenticated, async (req, res) => {
     if (req.player !== "p1")
@@ -308,6 +336,9 @@ export function createApi({
   app.post("/api/matches/:id/ready", authenticated, (req, res) =>
     res.json(ready(req.match.game, req.player, req.body.turn, now())),
   );
+  app.post("/api/matches/:id/unready", authenticated, (req, res) =>
+    res.json(unready(req.match.game, req.player, req.body.turn, now())),
+  );
   app.post("/api/matches/:id/settings", authenticated, (req, res) =>
     res.json(setSettings(req.match.game, req.player, req.body, now())),
   );
@@ -346,7 +377,7 @@ export function createApi({
       await new Promise((r) => setTimeout(r, 200));
       advanceDue(req.match.game, now());
     }
-    if (!res.destroyed) res.json(observe(req.match.game, req.player, now()));
+    if (!res.destroyed) res.json(cachedObserve(req.match, req.player, now()));
   });
   app.use("/api", (_req, res) =>
     res.status(404).json({ error: "없는 게임 API예요." }),

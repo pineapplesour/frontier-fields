@@ -10,6 +10,8 @@ import {
   key,
   TERRAINS,
   farmTerrainYield,
+  wheatFoodBonus,
+  FEATURES,
 } from "../shared/rules.js";
 import { Icon } from "./Icons.jsx";
 import { Modal } from "./Panels.jsx";
@@ -889,7 +891,7 @@ export function TileCompanion({ game, tile }) {
           <Icon name="wheat" size={17} />
           <span>
             {farmTerrainYield(tile).name}{tile.farm ? "" : " 예상"}{" "}
-            <b>식량 +{farmTerrainYield(tile).base + tile.fertility + adjacent}{farmTerrainYield(tile).production ? " · 생산 +1" : ""}</b>
+            <b>식량 +{farmTerrainYield(tile).base + tile.fertility + adjacent + wheatFoodBonus(tile)}{farmTerrainYield(tile).production ? " · 생산 +1" : ""}{wheatFoodBonus(tile) ? ` · ${FEATURES.wheat.name} +${wheatFoodBonus(tile)}` : ""}</b>
             <small>인접 {adjacent}면</small>
           </span>
         </div>

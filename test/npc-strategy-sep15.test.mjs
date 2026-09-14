@@ -9,6 +9,7 @@ import {
   observe,
   submitOrders,
   transact,
+  resolveTurn,
 } from "../server/engine.mjs";
 import { equal, distance } from "../shared/rules.js";
 import {
@@ -359,4 +360,96 @@ test("without clear advantage or justification an NPC stays at peace over a long
     );
   }
   assert.equal(g.wars.length, 0);
+});
+
+// ------------------------------------------------------------- expansion
+
+function runRounds(g, rounds) {
+  for (let i = 0; i < rounds; i++) {
+    resolveTurn(g, 0);
+    resolveTurn(g, 0);
+  }
+}
+
+test("an NPC with open land and gold founds at least three cities within twenty rounds", () => {
+  const g = field("p3", []);
+  city(g, "p3", 6, 6);
+  g.gold.p3 = 300;
+  addUnit(g, "p3", "spearman", { q: 6, r: 6 });
+  addUnit(g, "p3", "builder", { q: 6, r: 6 });
+  runRounds(g, 20);
+  const own = g.cities.filter((c) => c.owner === "p3");
+  assert.ok(own.length >= 3, `founded ${own.length} cities`);
+  assert.ok(own.every((c) => c.hp > 0));
+});
+
+test("a rich NPC buys a settler outright instead of waiting for production", () => {
+  const g = field("p3", []);
+  const c = city(g, "p3", 6, 6);
+  g.gold.p3 = 300;
+  g.turn = 40; // restored mid-game: the land is already known
+  addUnit(g, "p3", "spearman", { q: 7, r: 6 });
+  g.explored.p3 = Object.fromEntries(
+    g.tiles.map((t) => [`${t.q},${t.r}`, { ...t }]),
+  );
+  const plans = npcEconomy(observe(g, "p3"));
+  const buy = plans.find((p) => p.transaction?.action === "buyUnit");
+  assert.ok(buy, JSON.stringify(plans));
+  assert.equal(buy.transaction.type, "settler");
+  assert.equal(buy.transaction.cityId, c.id);
+  assert.doesNotThrow(() => transact(g, "p3", { turn: g.turn, ...buy.transaction }));
+  assert.ok(g.units.some((u) => u.owner === "p3" && u.type === "settler"));
+});
+
+test("an escorted settler settles instead of oscillating between sites", () => {
+  const g = field("p3", []);
+  city(g, "p3", 4, 4);
+  g.gold.p3 = 0;
+  addUnit(g, "p3", "settler", { q: 6, r: 4 });
+  addUnit(g, "p3", "spearman", { q: 6, r: 5 });
+  runRounds(g, 8);
+  assert.equal(g.cities.filter((c) => c.owner === "p3").length, 2);
+  assert.ok(!g.units.some((u) => u.owner === "p3" && u.type === "settler"));
+});
+
+test("expansion respects the city cap", () => {
+  const g = field("p3", []);
+  for (let i = 0; i < NPC_STRATEGY.MAX_CITIES; i++) city(g, "p3", 2 + (i % 4) * 4, 3 + Math.floor(i / 4) * 6);
+  g.gold.p3 = 500;
+  addUnit(g, "p3", "spearman", { q: 2, r: 3 });
+  const plans = npcEconomy(observe(g, "p3"));
+  assert.ok(!plans.some((p) => p.transaction?.type === "settler"));
+  assert.ok(!plans.some((p) => p.production?.[0].type === "settler"));
+});
+
+// ------------------------------------------------------------ formations
+
+test("four battalions form a division within a few rounds", () => {
+  const g = field("p3", []);
+  city(g, "p3", 4, 4);
+  for (const p of [
+    { q: 4, r: 4 },
+    { q: 5, r: 4 },
+    { q: 4, r: 5 },
+    { q: 3, r: 5 },
+  ])
+    addUnit(g, "p3", "spearman", p);
+  runRounds(g, 6);
+  const spears = g.units.filter((u) => u.owner === "p3" && u.type === "spearman");
+  assert.ok(spears.some((u) => u.size === 4), spears.map((u) => u.size).join(","));
+});
+
+test("a defending NPC forms at least a brigade at the threatened city", () => {
+  const g = field("p3", ["p1|p3"]);
+  const home = city(g, "p3", 6, 6);
+  g.gold.p3 = 0; // no settler purchases pulling escorts away
+  addUnit(g, "p3", "spearman", { q: 6, r: 6 });
+  addUnit(g, "p3", "spearman", { q: 7, r: 6 });
+  addUnit(g, "p1", "spearman", { q: 6, r: 10 }, { size: 2, hp: 200 });
+  addUnit(g, "p3", "cavalry", { q: 8, r: 8 }); // scout keeps the threat in view
+  runRounds(g, 2);
+  const near = g.units.filter(
+    (u) => u.owner === "p3" && u.type === "spearman" && distance(u, home) <= 1,
+  );
+  assert.ok(near.some((u) => u.size >= 2), near.map((u) => `${u.size}@${u.q},${u.r}`).join(" "));
 });

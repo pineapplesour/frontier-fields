@@ -6,6 +6,7 @@ import {
   submitOrders,
   observe,
   ready,
+  unready,
   resolveTurn,
   advanceDue,
   setSettings,
@@ -134,4 +135,49 @@ test("sequential expansion matches are unchanged by the new option", () => {
   ready(g, "p1", 1, 1300);
   assert.equal(g.activePlayer, "p2");
   assert.equal(g.turn, 1);
+});
+
+test("simultaneous: a ready seat may take it back until the round settles", () => {
+  const g = game();
+  const a = addUnit(g, "p1", "spearman", { q: 4, r: 6 });
+  addUnit(g, "p2", "spearman", { q: 9, r: 6 });
+  startGame(g, 1000);
+  ready(g, "p1", 1, 1100);
+  assert.equal(g.players.p1.ready, true);
+  assert.equal(observe(g, "p1", 1150).activePlayer, "waiting");
+  assert.throws(() => submitOrders(g, "p1", { turn: 1, orders: [{ unitId: a.id, action: "fortify" }] }, 1150), /준비 완료/);
+  assert.throws(() => unready(g, "p2", 1, 1200), /아직 턴을 마치지/);
+  const before = g.revision;
+  const obs = unready(g, "p1", 1, 1200);
+  assert.equal(g.players.p1.ready, false);
+  assert.equal(obs.ready, false);
+  assert.equal(obs.activePlayer, "p1");
+  assert.equal(g.revision, before + 1);
+  assert.ok(obs.events.some((e) => /턴 종료를 해제/.test(e.text)));
+  assert.deepEqual(observe(g, "p2", 1250).activeSeats, ["p1", "p2"]);
+  submitOrders(g, "p1", { turn: 1, orders: [{ unitId: a.id, action: "fortify" }] }, 1300);
+  assert.equal(g.turn, 1, "orders are accepted again without settling");
+  // Both seats ready: the round settles first, so there is nothing to undo.
+  ready(g, "p1", 1, 1400);
+  ready(g, "p2", 1, 1500);
+  assert.equal(g.turn, 2);
+  assert.throws(() => unready(g, "p1", 1, 1600), /턴이 바뀌었어요/);
+  assert.throws(() => unready(g, "p1", 2, 1600), /아직 턴을 마치지/);
+  // The shared countdown also settles before an unready can land.
+  ready(g, "p1", 2, 1700);
+  const late = 1500 + g.turnSeconds * 1000 + 1;
+  assert.throws(() => unready(g, "p1", 2, late), /이미 정산됐어요/);
+  assert.equal(g.turn, 3);
+  assert.equal(g.players.p1.ready, false);
+});
+
+test("sequential: unready is refused with a clear message", () => {
+  const g = game("sequential");
+  addUnit(g, "p1", "spearman", { q: 4, r: 6 });
+  addUnit(g, "p2", "spearman", { q: 9, r: 6 });
+  startGame(g, 1000);
+  assert.throws(() => unready(g, "p1", 1, 1100), /교대 턴에서는 턴 종료를 해제할 수 없어요/);
+  ready(g, "p1", 1, 1200);
+  assert.equal(g.activePlayer, "p2");
+  assert.throws(() => unready(g, "p1", 1, 1300), /교대 턴/);
 });

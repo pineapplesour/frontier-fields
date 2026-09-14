@@ -62,6 +62,10 @@ test("HTTP seats, one-use invite, private orders, readiness, cutoff, and MCP obs
     (await req(`${path}/ready`, { token: a.token, body: { turn: 1 } })).status,
     409,
   );
+  // Sequential matches have no ready to take back.
+  const noUnready = await req(`${path}/unready`, { token: a.token, body: { turn: 1 } });
+  assert.equal(noUnready.status, 409);
+  assert.match(noUnready.data.error ?? JSON.stringify(noUnready.data), /교대 턴/);
   const resumed = await req(`${path}/settings`, {
     token: a.token,
     body: { paused: false },
@@ -103,7 +107,7 @@ test("HTTP seats, one-use invite, private orders, readiness, cutoff, and MCP obs
   await client.connect(transport);
   try {
     const toolList = await client.listTools();
-    assert.equal(toolList.tools.length, 7);
+    assert.equal(toolList.tools.length, 8);
     assert.ok(
       toolList.tools
         .find((t) => t.name === "game_orders")

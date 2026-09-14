@@ -18,10 +18,18 @@ import {
   cityMaxHealth,
   settlementIssue,
   farmTerrainYield,
+  wheatFoodBonus,
+  FEATURES,
+  CHOP_PRODUCTION,
+  HARVEST_FOOD,
+  HARVEST_PRODUCTION,
+  HARVEST_RESOURCE_AMOUNT,
+  WHEAT_FARM_FOOD_BONUS,
+  PRODUCTION_BANK_CAP,
 } from "../shared/rules.js";
 import { combatStrength, formationTierName } from "../shared/combat.js";
 import { fortIssue } from "../shared/structures.js";
-import { constructionIssue } from "../shared/construction.js";
+import { constructionIssue, featureActionIssue } from "../shared/construction.js";
 import { Icon, UnitIcon } from "./Icons.jsx";
 import { FeedbackContext } from "./feedback.js";
 import { factionFor } from "./factions.js";
@@ -38,7 +46,7 @@ import {
   cityDefenseSummary,
   wallRepairEligibility,
 } from "./cityDefenseHelpers.js";
-import { canMergeEqualTier, canMergeFromTier } from "./formationHelpers.js";
+import { canMergeEqualTier, canMergeFromTier, mergePartners, NO_MERGE_PARTNER_TIP } from "./formationHelpers.js";
 
 export function Modal({ title, onClose, children, wide = false }) {
   const ref = useRef(null);
@@ -193,6 +201,19 @@ export function Selection({
           ? "이번 턴에 남은 이동력이 있어야 건설할 수 있어요."
           : null)
       : null;
+  const movesIssue =
+    unit?.movesLeft <= 0 ? "이번 턴에 남은 이동력이 있어야 할 수 있어요." : null;
+  const chopIssue =
+    unit?.type === "builder" ? featureActionIssue(game, unit, "chop") ?? movesIssue : null;
+  const harvestIssue =
+    unit?.type === "builder" ? featureActionIssue(game, unit, "harvest") ?? movesIssue : null;
+  const harvestTip = tile
+    ? tile.feature === "wheat"
+      ? `${FEATURES.wheat.name} 수확 · 즉시 식량 +${HARVEST_FOOD} · 생산력 +${HARVEST_PRODUCTION} · 밀밭이 사라져요. 건설 1회 소모.`
+      : RESOURCES[tile.resource]
+        ? `${RESOURCES[tile.resource].name} 매장지 채굴 · 즉시 ${RESOURCES[tile.resource].name} +${HARVEST_RESOURCE_AMOUNT} · 생산력 +${HARVEST_PRODUCTION} · 매장지가 영구히 사라져요(개발 대신 선택). 건설 1회 소모.`
+        : null
+    : null;
   const queueDefinition = city?.queue
     ? productionType(city.queue, city)
     : null;
@@ -313,9 +334,9 @@ export function Selection({
           tile?.terrain !== "unknown" ? (
           <div className="selection-numbers">
             <span>
-              {farmTerrainYield(tile).name} 예상 <b>식량 +{farmTerrainYield(tile).base + tile.fertility + adjacent}{farmTerrainYield(tile).production ? " · 생산 +1" : ""}</b>
+              {farmTerrainYield(tile).name} 예상 <b>식량 +{farmTerrainYield(tile).base + tile.fertility + adjacent + wheatFoodBonus(tile)}{farmTerrainYield(tile).production ? " · 생산 +1" : ""}{wheatFoodBonus(tile) ? ` · ${FEATURES.wheat.name} +${wheatFoodBonus(tile)}` : ""}</b>
             </span>
-            <small>인접 농지 {adjacent}칸</small>
+            <small>인접 농지 {adjacent}칸{tile.feature ? ` · ${FEATURES[tile.feature]?.name ?? tile.feature}` : ""}</small>
           </div>
         ) : null}
       </div>
@@ -374,6 +395,12 @@ export function Selection({
               {cityFood?.net ?? city.foodNet}
             </b>
           </span>
+          <span
+            className="city-stored-production"
+            data-tip={`생산을 예약하지 않은 턴의 생산력은 최대 ${PRODUCTION_BANK_CAP}까지 비축되고, 다음 생산 예약에 즉시 더해져요.`}
+          >
+            비축 생산력 <b>{city.storedProduction ?? 0}</b>
+          </span>
           {detailedSupply && cityFood?.stockAvailable ? (
             <span
               className="city-food-stock-inline"
@@ -428,16 +455,45 @@ export function Selection({
                   !unit.charges ||
                   tile.farm ||
                   tile.developed ||
+                  tile.feature === "forest" ||
                   tile.fort?.hp > 0 ||
                   tile.owner !== game.playerId ||
                   game.cities.some((c) => key(c) === key(unit))
                 }
                 onClick={() => onAction("farm")}
-                data-tip="즉시 농지를 조성하고 이번 턴 이동력을 모두 써요. 건설 1회 소모, 마지막 건설 후 건축자는 사라져요."
+                data-tip={
+                  tile.feature === "forest"
+                    ? "숲을 먼저 베어야 농지를 지을 수 있어요."
+                    : `즉시 농지를 조성하고 이번 턴 이동력을 모두 써요.${tile.feature === "wheat" ? ` 밀밭 농지는 식량 +${WHEAT_FARM_FOOD_BONUS}.` : ""} 건설 1회 소모, 마지막 건설 후 건축자는 사라져요.`
+                }
               >
                 <Icon name="wheat" size={17} />
-                농지 조성
+                농지 조성{tile.feature === "wheat" ? ` · 밀 +${WHEAT_FARM_FOOD_BONUS}` : ""}
               </button>
+              {tile.feature === "forest" ? (
+                <button
+                  className="soft-button"
+                  disabled={disabled || !!chopIssue}
+                  onClick={() => onAction("chop")}
+                  data-tip={chopIssue ?? `숲 벌목 · 가장 가까운 내 도시에 즉시 생산력 +${CHOP_PRODUCTION} · 건설 1회 소모.`}
+                >
+                  <Icon name="tools" size={17} />
+                  벌목 · 생산 +{CHOP_PRODUCTION}
+                </button>
+              ) : null}
+              {tile.feature === "wheat" || (RESOURCES[tile.resource] && !tile.developed) ? (
+                <button
+                  className="soft-button"
+                  disabled={disabled || !!harvestIssue}
+                  onClick={() => onAction("harvest")}
+                  data-tip={harvestIssue ?? harvestTip}
+                >
+                  <Icon name={tile.feature === "wheat" ? "wheat" : RESOURCES[tile.resource].icon} size={17} />
+                  {tile.feature === "wheat"
+                    ? `수확 · 식량 +${HARVEST_FOOD} · 생산 +${HARVEST_PRODUCTION}`
+                    : `채굴 · ${RESOURCES[tile.resource].name} +${HARVEST_RESOURCE_AMOUNT} · 생산 +${HARVEST_PRODUCTION}`}
+                </button>
+              ) : null}
               <button
                 className="soft-button"
                 disabled={
@@ -521,6 +577,23 @@ export function Selection({
               </button>
             </>
           )}
+          {!def?.civilian && canMergeFromTier(unit) ? (
+            <button
+              className={`soft-button merge-button ${mode === "mapPick" ? "active" : ""}`}
+              disabled={disabled || mergePartners(game, unit).length === 0}
+              aria-disabled={disabled || mergePartners(game, unit).length === 0}
+              data-tip={
+                mergePartners(game, unit).length
+                  ? `지도에서 강조된 인접 부대를 누르면 바로 합병 명령을 보내요 (${unit.size === 1 ? "대대+대대→여단" : "여단+여단→사단"}).`
+                  : NO_MERGE_PARTNER_TIP
+              }
+              title={mergePartners(game, unit).length ? undefined : NO_MERGE_PARTNER_TIP}
+              onClick={onMerge}
+            >
+              <Icon name="merge" size={17} />
+              합병
+            </button>
+          ) : null}
           <button className="soft-button details-button" onClick={onDetails}>
             <Icon name="info" size={17} />
             <span>상세</span>
@@ -576,8 +649,12 @@ export function Selection({
               : tile.terrain === "mountain"
                 ? "산지는 이동할 수 없어요."
                 : tile.resource
-                  ? `${RESOURCES[tile.resource].name} 매장지 · 건축자로 시설을 개발할 수 있어요.`
-                  : "건축자가 이 칸에 있으면 농지를 조성할 수 있어요."}
+                  ? `${RESOURCES[tile.resource].name} 매장지 · 건축자로 시설을 개발하거나, 채굴해 즉시 ${RESOURCES[tile.resource].name} +${HARVEST_RESOURCE_AMOUNT} · 생산력 +${HARVEST_PRODUCTION}을 얻고 없앨 수 있어요.`
+                  : tile.feature === "forest"
+                    ? `숲 · 건축자가 베면 즉시 생산력 +${CHOP_PRODUCTION}. 농지는 벌목 후에 지을 수 있어요.`
+                    : tile.feature === "wheat"
+                      ? `밀밭 · 농지를 지으면 식량 +${WHEAT_FARM_FOOD_BONUS}, 수확하면 즉시 식량 +${HARVEST_FOOD} · 생산력 +${HARVEST_PRODUCTION}.`
+                      : "건축자가 이 칸에 있으면 농지를 조성할 수 있어요."}
         </p>
       )}
       {city?.owner === game.playerId && city.wallLevel > 0 ? (
@@ -641,6 +718,8 @@ export function Selection({
                 bombard: "포격 예약",
                 farm: "농지 조성 예약",
                 develop: "자원 개발 예약",
+                chop: "벌목 예약",
+                harvest: "수확 예약",
                 found: "도시 건설 예약",
                 fortify: "방어 준비 · 다음 턴부터 적용",
                 merge: "합병 예약",
@@ -790,7 +869,7 @@ export function UnitDetails({
                 </div>
                 <div>
                   {tile.farm ? "현재 농지 식량" : "농지 조성 시 식량"}
-                  <strong>+{farmTerrainYield(tile).base + tile.fertility + adjacentFarms} / 턴{farmTerrainYield(tile).production ? " · 구릉지 농지 생산 +1" : ""}</strong>
+                  <strong>+{farmTerrainYield(tile).base + tile.fertility + adjacentFarms + wheatFoodBonus(tile)} / 턴{farmTerrainYield(tile).production ? " · 구릉지 농지 생산 +1" : ""}{wheatFoodBonus(tile) ? ` · 밀밭 +${wheatFoodBonus(tile)}` : ""}</strong>
                 </div>
               </div>
               <p>
@@ -962,7 +1041,7 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
   return (
     <>
       <p className="description">
-        {city.name} · 턴당 생산력 {city.productionRate}
+        {city.name} · 턴당 생산력 {city.productionRate} · 비축 생산력 {city.storedProduction ?? 0}
         {game.economy.armyCapacityEnabled !== false
           ? ` · 병력 ${game.economy.used}/${game.economy.capacity}`
           : " · 상세 보급 ON · 병력 수용량 대신 인구 동원"}
@@ -1145,7 +1224,7 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
             onChoose(null);
           }}
         >
-          <Icon name="wheat" size={16} /> 생산 안 함 · 식량 생산 +25%
+          <Icon name="wheat" size={16} /> 생산 안 함 · 식량 생산 +25% · 생산력 비축(최대 {PRODUCTION_BANK_CAP})
         </button>
       }
       {(game.capabilities?.populationRules === true || game.rulesVersion === "expansion-v1") && onBuy && detailedSupply ? (
@@ -1155,7 +1234,9 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
       ) : null}
       <p className="fine-print">
         자원은 생산을 예약할 때 차감돼요. 생산을 바꾸거나 취소하면 예약 자원이
-        반환돼요. 생산 종류를 바꾸면 쌓인 생산력은 초기화돼요. 건축가와 전투
+        반환돼요. 생산 종류를 바꾸면 쌓인 생산력은 초기화돼요. 생산을 예약하지
+        않은 턴의 생산력은 최대 {PRODUCTION_BANK_CAP}까지 비축되어 다음 예약에 즉시
+        더해지고, 완성 후 남은 생산력도 비축돼요. 건축가와 전투
         유닛은 도시 칸에 함께 있을 수 있고, 같은 분류가 있거나 수용량이 가득
         차면 완성 대기해요. 생산·즉시 구매마다 인구 0.5를
         배정하고, 도시는 최소 인구 1명을 남겨요. 성벽은 3레벨까지 증축하며
@@ -1187,6 +1268,20 @@ export function Rules() {
         식량과 유닛별 식량을 따로 사용해요. 도시의 병력 소비 수치는 보급 수요를
         보여주는 정보이고, 실제 병력 식량은 유닛 보급으로 정산돼요. 철·말·초석
         매장지를 건축자로 개발하면 보급된 시설마다 턴당 자원 1을 얻어요.
+      </p>
+      <h3>생산력 비축과 지형 특성</h3>
+      <p>
+        도시가 아무것도 생산하지 않는 턴의 생산력은 최대 {PRODUCTION_BANK_CAP}까지
+        비축되고, 다음 생산을 예약하면 즉시 더해져요. 완성 후 남는 생산력도
+        비축돼요. 평지·구릉지에는 숲, 비옥한 평지에는 밀밭이 있어요. 건축자가
+        숲을 베면(건설 1회) 가장 가까운 내 도시에 즉시 생산력 +{CHOP_PRODUCTION}을
+        주고, 숲이 있는 칸은 벌목 후에만 농지를 지을 수 있어요. 밀밭에 농지를
+        지으면 황금빛 농지가 되어 식량 +{WHEAT_FARM_FOOD_BONUS}을 더 내고, 대신
+        수확하면(건설 1회) 즉시 식량 +{HARVEST_FOOD} · 생산력 +{HARVEST_PRODUCTION}을
+        얻고 밀밭이 사라져요. 개발하지 않은 철·말·초석 매장지는 채굴해(건설
+        1회) 즉시 자원 +{HARVEST_RESOURCE_AMOUNT} · 생산력 +{HARVEST_PRODUCTION}을
+        얻을 수 있지만 매장지는 영구히 사라져요. 벌목·수확은 내 영토나 내
+        영토에 인접한 빈 땅에서만 할 수 있어요.
       </p>
       <p>
         유닛은 도시 타일에 생성돼요. 보급 ON의 전투 병력은 도시별 인구 동원
@@ -1259,7 +1354,9 @@ export function Rules() {
         평지는 이동력 1, 구릉지는 2, 산지는 이동 불가예요. 적 병력의 인접 칸에
         들어가면 이동이 멈춰요. 이미 적 옆에 있다면 한 칸만 이동할 수 있어요.
         구릉지의 방어력은 +20%. 강을 건너면 도하 턴과 이후 2턴 동안 전투력 −20%,
-        강 너머 직접 공격은 추가 −25%예요.
+        강 너머 직접 공격은 추가 −25%예요. 포병 포격, 머스킷병 2칸 사격, 도시 성벽
+        포격 같은 원거리 사격은 사수와 목표 사이 직선의 중간 칸이 산이면 불가능해요.
+        직선이 두 칸 사이를 정확히 지나면 두 칸이 모두 산일 때만 막혀요.
       </p>
       <p>
         유닛을 선택한 뒤 우클릭하면 이동해요. 우클릭을 누른 채 경유지를 그릴

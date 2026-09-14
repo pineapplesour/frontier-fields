@@ -65,7 +65,13 @@ export const NPC_STRATEGY = Object.freeze({
   CITY_VISION: 3, // enemy cities see this far (mirrors engine visibility)
   HIDE_PENALTY: 16, // rank penalty for standing in enemy vision while the strike is not ready
   STAGING_DISTANCE: 4, // offensive march stops on this ring around the objective (just outside city vision)
-  MERGE_MIN_ARMY: 4, // quiet-time merging into brigades/divisions starts at this army size
+  STAGING_MAX_TURNS: 3, // after this many war turns the army commits if it still has any edge
+  STRIKE_COMMIT_RATIO: 1.0, // "any edge" = strike >= garrison power (city hp excluded) * ratio
+  RAID_RANGE: 4, // with no city target, raid enemy improvements within this range of the unit
+  MERGE_MIN_ARMY: 2, // formations start as soon as two same-type battalions exist
+  MERGE_MAX_DANGER_RATIO: 0.5, // no merging under fire heavier than hp * ratio
+  MERGE_RALLY_RANGE: 4, // approach a same-type partner within this range to form up
+  MERGE_MIN_HP_RATIO: 0.5, // both halves must be at least this healthy (hurt units merge to recover anyway)
   // --- growth and buildup ---------------------------------------------------
   MAX_CITIES: 8, // land-based cap: sites must also lie within 8 tiles of an own city
   SETTLER_MIN_POP: 3, // the settler city keeps growing past this
@@ -285,7 +291,10 @@ export function npcEconomy(view) {
     ...(cities[0] ?? { q: 0, r: 0 }),
     type: "settler",
   });
+  // A visibly stronger neighbour comes first: parity before expansion.
+  const outmatched = armyPower < neighbourPower * S.ARMY_PARITY_RATIO;
   const settlersWanted =
+    !outmatched &&
     cities.length < S.MAX_CITIES &&
     sites.length > 0 &&
     count("settler") <
@@ -481,10 +490,41 @@ export function npcTurnOrder(view) {
     .map((u) => u.id);
 }
 
+// Compact per-decision trace for hosts: mode, target and chosen action.  Kept
+// in a bounded ring buffer; printed only with FRONTIER_NPC_DEBUG=1.
+export const npcDecisionLog = [];
+const NPC_LOG_LIMIT = 400;
+const debugEnabled = () =>
+  typeof process !== "undefined" && !!process.env?.FRONTIER_NPC_DEBUG;
+function recordDecision(view, u, trace, order) {
+  const entry = {
+    turn: view.turn,
+    player: view.playerId,
+    unit: `${u.type}${u.size > 1 ? `x${u.size}` : ""}@${u.q},${u.r}`,
+    unitId: u.id,
+    mode: trace.mode ?? "peace",
+    target: trace.target ?? null,
+    action: order?.action ?? "idle",
+    to: order?.target ? `${order.target.q},${order.target.r}` : null,
+    why: trace.why ?? (order ? "default" : "nothing-to-do"),
+  };
+  npcDecisionLog.push(entry);
+  if (npcDecisionLog.length > NPC_LOG_LIMIT) npcDecisionLog.shift();
+  if (debugEnabled())
+    console.debug(
+      `[npc] t${entry.turn} ${entry.player} ${entry.unit} mode=${entry.mode} target=${entry.target ?? "-"} -> ${entry.action}${entry.to ? ` ${entry.to}` : ""} (${entry.why})`,
+    );
+  return order;
+}
 export function npcUnitOrder(view, id) {
   if (!isNpc(view)) return null;
   const u = view.units.find((u) => u.id === id && u.owner === view.playerId);
   if (!u || u.attackUsed) return null;
+  const trace = {};
+  return recordDecision(view, u, trace, unitOrderInner(view, u, trace));
+}
+function unitOrderInner(view, u, trace) {
+  const id = u.id;
   // A pending pillage/scorch resolves at end of turn; never override it.
   if (["pillage", "scorch"].includes(u.order?.action)) return null;
   const { allies, foes, cities, enemyCities, tiles, home, support, danger } =
@@ -609,14 +649,37 @@ export function npcUnitOrder(view, id) {
       .filter((c) => !c.camp && distance(c, u) <= S.TARGET_CITY_RANGE)
       .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))[0] ??
     null;
-  const strikeReady = targetCity
-    ? strikeAt(targetCity) >= defenseAt(targetCity) * S.STRIKE_READY_RATIO
-    : true;
+  const atWar = factionList(view).some((f) => f.id !== "barb" && f.hostile);
   const warMode = !targetCity
-    ? null
+    ? atWar
+      ? "raid"
+      : null
     : strikeAt(targetCity) < defenseAt(targetCity) * S.STARVE_STRIKE_RATIO
       ? "starve"
       : "siege";
+  trace.mode = warMode;
+  trace.target = targetCity?.id ?? null;
+  // War age from the public peace lock (warStarted + 10): staging is bounded.
+  const warTurns = targetCity
+    ? Math.max(
+        0,
+        view.turn -
+          ((factionFor(view, targetCity.owner)?.peaceLockedUntil ?? view.turn + 10) - 10),
+      )
+    : 0;
+  const garrisonPower = targetCity
+    ? foes
+        .filter((e) => distance(e, targetCity) <= 2)
+        .reduce((n, e) => n + power(e), 0)
+    : 0;
+  const commit =
+    !!targetCity &&
+    warTurns >= S.STAGING_MAX_TURNS &&
+    strikeAt(targetCity) >= garrisonPower * S.STRIKE_COMMIT_RATIO;
+  const strikeReady = targetCity
+    ? strikeAt(targetCity) >= defenseAt(targetCity) * S.STRIKE_READY_RATIO ||
+      commit
+    : true;
   const healedHp = Math.min(maxHealth(u), u.hp + S.PILLAGE_HEAL);
   const pillageHere = () =>
     enemyImprovement(t) && !lethal(t, healedHp)
@@ -758,6 +821,29 @@ export function npcUnitOrder(view, id) {
       if (step && distance(step, goal) < distance(u, goal)) return moveTo(step);
       return atWarWith(t?.owner) ? withdraw() : null;
     }
+    if (warMode === "raid" && u.type !== "artillery" && !assigned) {
+      // No city to besiege: plunder exposed enemy improvements nearby.
+      const here = pillageHere();
+      if (here) return here;
+      if (holdingKeyPosition || u.movesLeft <= 0 || ratio < S.RAID_MIN_HP_RATIO)
+        return null;
+      const near = view.tiles
+        .filter(
+          (p) =>
+            enemyImprovement(p) &&
+            distance(p, u) <= S.RAID_RANGE &&
+            reach.has(key(p)) &&
+            !blocked(p) &&
+            !lethal(p, healedHp),
+        )
+        .sort(
+          (a, b) =>
+            danger(a) - danger(b) ||
+            reach.get(key(a)).cost - reach.get(key(b)).cost ||
+            stable(a, b),
+        );
+      if (near[0]) return moveTo(near[0]);
+    }
     if (ratio >= S.SIEGE_HEAL_RATIO) return null;
     const here = pillageHere();
     if (here) return here;
@@ -816,7 +902,10 @@ export function npcUnitOrder(view, id) {
   )
     return shoot(shot);
   const plunder = pillagePlan();
-  if (plunder) return plunder;
+  if (plunder) {
+    trace.why = `pillage-policy:${warMode}`;
+    return plunder;
+  }
   if (
     (isCivilian(u) && currentDanger > 5) ||
     (u.isolation >= 2 && u.type !== "settler") ||
@@ -837,6 +926,7 @@ export function npcUnitOrder(view, id) {
         !foes.some((e) => distance(e, u) <= 5);
       const sitesNow = settlementSites(view, u);
       const goodHere =
+        cities.length === 0 ||
         sitesNow.length === 0 ||
         sitesNow.slice(0, 3).some((site) => distance(site, u) <= 1);
       if (
@@ -928,21 +1018,74 @@ export function npcUnitOrder(view, id) {
     return shoot(shot);
   if (u.movesLeft <= 0) return null;
   if (currentDanger >= u.hp * 0.7) return retreat();
-  const mate = allies.find(
-    (e) =>
-      e.id !== id &&
-      e.type === u.type &&
-      ((e.size === 1 && u.size === 1) || (e.size === 2 && u.size === 2)) &&
-      distance(e, u) <= 1 &&
-      (ratio < 0.7 ||
-        (targets.length && foes.some((x) => x.size > u.size)) ||
-        // Quiet buildup: form brigades/divisions once the army is large enough.
-        (!targets.length &&
-          ratio >= 0.9 &&
-          e.hp / maxHealth(e) >= 0.9 &&
-          allies.filter(military).length >= S.MERGE_MIN_ARMY)),
-  );
-  if (mate) return { unitId: id, action: "merge", targetId: mate.id };
+  // Formations: battalion+battalion -> brigade, brigade+brigade -> division.
+  // Proactive everywhere that is not under heavy fire: while massing for an
+  // offensive, while defending a city and in quiet territory.  One cavalry
+  // scout stays unmerged.
+  const scoutId = allies.filter((e) => e.type === "cavalry").sort(stable)[0]?.id;
+  const partner = (e) =>
+    e.id !== id &&
+    e.id !== scoutId &&
+    e.type === u.type &&
+    military(e) &&
+    e.order?.action !== "merge" &&
+    ((e.size === 1 && u.size === 1) || (e.size === 2 && u.size === 2));
+  const healthyPair = (e) =>
+    ratio >= S.MERGE_MIN_HP_RATIO && e.hp / maxHealth(e) >= S.MERGE_MIN_HP_RATIO;
+  const mate = allies
+    .filter(
+      (e) =>
+        partner(e) &&
+        distance(e, u) <= 1 &&
+        (healthyPair(e) ||
+          ratio < 0.7 ||
+          (targets.length && foes.some((x) => x.size > u.size))),
+    )
+    .sort(stable)[0];
+  if (
+    mate &&
+    id !== scoutId &&
+    u.movesLeft > 0 &&
+    currentDanger < u.hp * S.MERGE_MAX_DANGER_RATIO &&
+    allies.filter(military).length >= S.MERGE_MIN_ARMY
+  ) {
+    trace.why = "form-up:merge";
+    return { unitId: id, action: "merge", targetId: mate.id };
+  }
+  // Rally: with no enemy in contact, the later unit walks to the earlier one.
+  if (id !== scoutId && !targets.length && u.movesLeft > 0 && u.size < 4) {
+    const buddy = allies
+      .filter((e) => partner(e) && healthyPair(e) && distance(e, u) <= S.MERGE_RALLY_RANGE)
+      .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))[0];
+    if (buddy && stable(buddy, u) < 0) {
+      const spot = view.tiles
+        .filter(
+          (p) =>
+            reach.has(key(p)) &&
+            p.explored &&
+            !blocked(p) &&
+            !lethal(p) &&
+            distance(p, buddy) <= 1 &&
+            !equal(p, u),
+        )
+        .sort((a, b) => danger(a) - danger(b) || ground(b) - ground(a) || stable(a, b))[0];
+      if (spot) {
+        trace.why = "form-up:rally";
+        return moveTo(spot);
+      }
+      const step = view.tiles
+        .filter((p) => reach.has(key(p)) && p.explored && !blocked(p) && !lethal(p) && !equal(p, u))
+        .sort((a, b) => distance(a, buddy) - distance(b, buddy) || danger(a) - danger(b) || stable(a, b))[0];
+      if (step && distance(step, buddy) < distance(u, buddy)) {
+        trace.why = "form-up:approach";
+        return moveTo(step);
+      }
+    } else if (buddy && !assigned) {
+      // Anchor: wait for the partner instead of wandering off.
+      trace.why = "form-up:anchor";
+      return fortify();
+    }
+  }
 
   // One nearest front-line unit escorts each settler, without exposing anything new.
   const settler = allies
@@ -988,6 +1131,9 @@ export function npcUnitOrder(view, id) {
       continue;
     const moved = { ...u, ...point(p), movesLeft: left, fortified: false };
     for (const e of targets) {
+      // Do not reveal a massing army just to chip at a city before the
+      // strike is ready; enemy units in the open are still engaged.
+      if (!e.type && !strikeReady && seenByEnemy(p)) continue;
       const preview = combatPreview(view, moved, e);
       if (!preview?.legal || preview.received[1] + danger(p) * 0.4 >= u.hp)
         continue;
@@ -1005,8 +1151,14 @@ export function npcUnitOrder(view, id) {
   firing.sort((a, b) => b.score - a.score || stable(a.p, b.p));
   if (firing[0]) return moveTo(firing[0].p);
   // Garrison and farmland defense come before advancing the line.
-  if (assigned?.hold) return fortify();
-  if (assigned?.order) return assigned.order;
+  if (assigned?.hold) {
+    trace.why = assigned.city ? "garrison-hold" : "intercept-hold";
+    return fortify();
+  }
+  if (assigned?.order) {
+    trace.why = assigned.city ? "garrison" : "intercept";
+    return assigned.order;
+  }
 
   // Advance the line as a group rather than walking artillery onto an enemy.
   if (targets.length) {
@@ -1037,6 +1189,11 @@ export function npcUnitOrder(view, id) {
           support(p) > 25,
       )
       .sort((a, b) => rank(b) - rank(a) || stable(a, b));
+    trace.why = outgunned
+      ? "advance:outgunned-hold-ground"
+      : strikeReady
+        ? "advance:strike"
+        : "advance:staging-hidden";
     if (
       candidates[0] &&
       !equal(candidates[0], u) &&
@@ -1080,8 +1237,10 @@ export function npcUnitOrder(view, id) {
           ground(b) - ground(a) ||
           stable(a, b),
       )[0];
-    if (step && distance(step, objective) < distance(u, objective))
+    if (step && distance(step, objective) < distance(u, objective)) {
+      trace.why = "march-to-staging";
       return moveTo(step);
+    }
   }
   // Pre-empt key ground between home and an approaching threat: hills, own
   // structures and tiles covering own farmland.
@@ -1102,12 +1261,12 @@ export function npcUnitOrder(view, id) {
       .filter((p) => keyTile(p) && p.explored && !lethal(p) && (equal(p, u) || (reach.has(key(p)) && !blocked(p))))
       .sort((a, b) => rank(b) - rank(a) || stable(a, b));
     if (spots[0]) {
+      trace.why = "key-position";
       if (equal(spots[0], u) || (keyTile(t) && rank(t) >= rank(spots[0]) - 1))
         return fortify();
       return moveTo(spots[0]);
     }
   }
-  const atWar = factionList(view).some((f) => f.id !== "barb" && f.hostile);
   const scouts = allies.filter((e) => e.type === "cavalry").sort(stable);
   const cheap = allies
     .filter((e) => military(e) && e.type !== "artillery")

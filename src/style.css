@@ -173,6 +173,25 @@ small {
   height: 2px;
   background: #1b7354;
 }
+/* Merge targeting: only eligible partner units stay interactive. */
+.world-labels.merge-pick > .world-unit-label:not(.pick-candidate) {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.world-labels.merge-pick > .world-unit-label.pick-candidate {
+  box-shadow: 0 0 0 3px #1b7354, 0 6px 18px #1b735433;
+}
+.world-labels > .map-target-marker.merge-target {
+  width: auto;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  white-space: nowrap;
+}
 .map-target-toolbar {
   position: fixed;
   z-index: 35;

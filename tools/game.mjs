@@ -23,6 +23,7 @@ try {
         "game transaction <JSON: {turn, action, ...}; includes city-tile reassignment and supply-ON mobilizeUnit/cancelMobilization; guarantees are public guarantor→protected edges (issue/withdraw own-turn; accept/reject your defensive call off-turn)>",
         "game preview <JSON: {factionId, give, receive, alliance, peace}>",
         "game ready <turn>",
+        "game unready <turn> (simultaneous mode only; cancel ready before the round settles)",
         "game wait <revision>",
       ],
       environment: [
@@ -104,6 +105,12 @@ try {
       });
     else if (command === "ready")
       result = await request(base, `${route}/ready`, {
+        token,
+        method: "POST",
+        body: { turn: Number(args[0]) },
+      });
+    else if (command === "unready")
+      result = await request(base, `${route}/unready`, {
         token,
         method: "POST",
         body: { turn: Number(args[0]) },

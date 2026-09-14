@@ -1,30 +1,69 @@
 let context,
   resumePromise,
-  playedNotes = 0;
+  playedNotes = 0,
+  lastCue = null,
+  unlockInstalled = false;
 export const soundStatus = () => ({
   state: context?.state ?? "not-started",
   playedNotes,
+  lastCue,
 });
+// Support/QA hook: inspect the audio state from the console.
+if (typeof window !== "undefined") window.fieldlineSoundStatus = soundStatus;
+/**
+ * Create the AudioContext and (re)try to resume it.
+ *
+ * Browsers only honour resume() from inside a user gesture. A cue fired
+ * before the first gesture (a turn cue right after reload, for example)
+ * leaves the context suspended; that early resume() promise may stay
+ * pending forever, so it must never block a later gesture-driven resume.
+ * Every call while suspended therefore issues a fresh resume().
+ */
 export function unlockSound() {
   const Audio = window.AudioContext ?? window.webkitAudioContext;
   if (!Audio) return;
   context ??= new Audio();
-  if (context.state === "suspended" && !resumePromise)
+  if (context.state === "suspended") {
     resumePromise = context
       .resume()
       .catch(() => {})
       .finally(() => {
-        resumePromise = null;
+        if (context.state === "running") resumePromise = null;
       });
+  }
   return resumePromise;
+}
+/**
+ * Resume the context on the first pointer/keyboard gesture after load and
+ * keep listening until it is actually running (some browsers need a second
+ * gesture after a tab restore).
+ */
+export function installSoundUnlock(target = window) {
+  if (unlockInstalled || !target?.addEventListener) return () => {};
+  unlockInstalled = true;
+  const handler = () => {
+    unlockSound();
+    if (context?.state === "running") remove();
+  };
+  const events = ["pointerdown", "keydown", "touchend"];
+  for (const type of events)
+    target.addEventListener(type, handler, { capture: true, passive: true });
+  const remove = () => {
+    for (const type of events)
+      target.removeEventListener(type, handler, { capture: true });
+    unlockInstalled = false;
+  };
+  return remove;
 }
 export async function playSound(name, volume = 0.2) {
   if (volume <= 0) return;
   await unlockSound();
   if (!context || context.state !== "running" || volume <= 0) return;
   const now = context.currentTime;
+  lastCue = { name, at: now, notes: 0 };
   const note = (frequency, start, duration, type = "sine", end = frequency) => {
     playedNotes++;
+    lastCue.notes++;
     const oscillator = context.createOscillator(),
       gain = context.createGain();
     oscillator.type = type;

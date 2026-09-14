@@ -241,6 +241,64 @@ export function hexLine(a, b) {
   return points;
 }
 
+/**
+ * Interior hexes of the straight line between `a` and `b` (both endpoints
+ * excluded). Each step yields the candidate hexes it passes through: one hex
+ * normally, or both neighbours when the line runs exactly along the edge
+ * between two hexes.
+ */
+export function hexLineCandidates(a, b) {
+  if (!a || !b) return [];
+  const n = distance(a, b);
+  const steps = [];
+  for (let i = 1; i < n; i++) {
+    const x = a.q + ((b.q - a.q) * i) / n,
+      z = a.r + ((b.r - a.r) * i) / n,
+      y = -x - z;
+    const fx = x - Math.floor(x), fy = y - Math.floor(y), fz = z - Math.floor(z);
+    const tie = (f) => Math.abs(f - 0.5) < 1e-9;
+    const rx = Math.round(x), ry = Math.round(y), rz = Math.round(z);
+    const candidates = [];
+    if (tie(fx) && tie(fz) && !tie(fy)) {
+      candidates.push({ q: Math.floor(x), r: Math.ceil(z) }, { q: Math.ceil(x), r: Math.floor(z) });
+    } else if (tie(fx) && tie(fy) && !tie(fz)) {
+      candidates.push({ q: Math.floor(x), r: rz }, { q: Math.ceil(x), r: rz });
+    } else if (tie(fy) && tie(fz) && !tie(fx)) {
+      candidates.push({ q: rx, r: Math.floor(z) }, { q: rx, r: Math.ceil(z) });
+    } else {
+      const dx = Math.abs(rx - x), dy = Math.abs(ry - y), dz = Math.abs(rz - z);
+      let cq = rx, cr = rz;
+      if (dx > dy && dx > dz) cq = -ry - rz;
+      else if (dy > dz) { /* y adjusted; q,r unchanged */ }
+      else cr = -rx - ry;
+      candidates.push({ q: cq, r: cr });
+    }
+    steps.push(candidates);
+  }
+  return steps;
+}
+
+export const RANGED_MOUNTAIN_BLOCK_MESSAGE = "산에 가려 사격할 수 없어요.";
+
+/**
+ * A ranged shot (any distance ≥ 2) cannot pass over a mountain. A step whose
+ * line runs exactly between two hexes is blocked only if BOTH are mountains.
+ * Unknown/unexplored tiles never block; only observed mountains do.
+ */
+export function mountainBlocksLine(view, from, to) {
+  if (!from || !to) return false;
+  const tiles = view?.tiles ?? [];
+  const mountain = (p) => tiles.find((t) => equal(t, p))?.terrain === "mountain";
+  return hexLineCandidates(from, to).some(
+    (candidates) => candidates.length > 0 && candidates.every(mountain),
+  );
+}
+
+/** Null when the shot is clear; otherwise the player-facing reason. */
+export function rangedTargetIssue(view, from, to) {
+  return mountainBlocksLine(view, from, to) ? RANGED_MOUNTAIN_BLOCK_MESSAGE : null;
+}
+
 export function riverBetween(view, a, b) {
   const rivers = view?.rivers ?? [];
   const line = hexLine(a, b);
@@ -522,6 +580,7 @@ export function combatPreview(view, a, b) {
     range = distance(a, b),
     reasons = [],
     lineOfSight = a.type !== "musketeer" || hasLineOfSight(view, a, b),
+    mountainBlocked = mountainBlocksLine(view, a, b),
     ammunition = ammunitionState(view, a),
     targetStructure = city ? null : structureAt(view, b),
     structureProtected =
@@ -536,9 +595,11 @@ export function combatPreview(view, a, b) {
     b.hostile !== false &&
     (!city || b.hp > 0) &&
     lineOfSight &&
+    !mountainBlocked &&
     ammunition.ready &&
     !protectedTarget;
   if (range > TYPES[a.type].range) reasons.push("사거리 밖");
+  if (mountainBlocked) reasons.push(RANGED_MOUNTAIN_BLOCK_MESSAGE);
   if (a.attackUsed) reasons.push("이번 턴 공격 사용");
   if (!lineOfSight) reasons.push("사격선이 막혀 있어요");
   if (!ammunition.ready)

@@ -13,6 +13,7 @@ import {
   key,
   productionType,
   farmTerrainYield,
+  wheatFoodBonus,
 } from "../shared/rules.js";
 
 /**
@@ -171,7 +172,7 @@ function farmBase(g, tile) {
       distance(candidate, tile) === 1 &&
       assignedCity(g, candidate)?.id === ownerCity?.id,
   ).length;
-  return farmTerrainYield(tile).base + finite(tile.fertility) + adjacent;
+  return farmTerrainYield(tile).base + finite(tile.fertility) + adjacent + wheatFoodBonus(tile);
 }
 
 function inCityFootprint(g, city, tile) {

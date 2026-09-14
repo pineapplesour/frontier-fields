@@ -50,6 +50,12 @@ import {
   NITER_UPKEEP_PER_UNIT,
   EXPANSION_START_NITER,
   farmTerrainYield,
+  wheatFoodBonus,
+  CHOP_PRODUCTION,
+  HARVEST_FOOD,
+  HARVEST_PRODUCTION,
+  HARVEST_RESOURCE_AMOUNT,
+  PRODUCTION_BANK_CAP,
   MAX_TURNS,
 } from "../shared/rules.js";
 import { FORT_HP, fortIssue, structureAt, structureHp, structureWallHp, structureMaxHp, structureKind } from "../shared/structures.js";
@@ -89,11 +95,14 @@ import {
   preventMutualDeath,
   unfavorableFight,
   killXp,
+  rangedTargetIssue,
+  mountainBlocksLine,
   COMBAT_XP_PARTICIPATION,
   COMBAT_XP_KILL,
 } from "../shared/combat.js";
 import { randomUUID } from "node:crypto";
-import { constructionIssue } from "../shared/construction.js";
+import { constructionIssue, featureActionIssue } from "../shared/construction.js";
+import { ensureTileFeatures } from "./features.mjs";
 import { ANY_TURN_TRADES } from "../shared/turnPermissions.js";
 import { experimentCosts, editExperiment, refreshExperimentUnit, resetUnitActions } from "./experiment.mjs";
 import { notifyTrade } from "./notifications.mjs";
@@ -287,6 +296,8 @@ function interruptWallRepair(g, c) {
 function normalizeState(g) {
   ensureWarDiplomacy(g);
   ensureLogisticsState(g);
+  ensureTileFeatures(g);
+  for (const c of g.cities ?? []) normalizeStoredProduction(c);
   for (const u of g.units ?? []) normalizeFormation(u);
   for (const c of g.cities ?? []) normalizeCityDefense(c);
   g.tradeNotices ??= {};
@@ -296,6 +307,70 @@ function normalizeState(g) {
       : [];
     g.tradeNotices[id] = notices.slice(-30);
   }
+}
+// Civ-style production banking: a city that builds nothing keeps its
+// per-turn production (up to PRODUCTION_BANK_CAP) and spends it on the next
+// queued item.  Completion overflow is banked the same way.
+export function normalizeStoredProduction(city) {
+  city.storedProduction = Math.max(
+    0,
+    Math.min(PRODUCTION_BANK_CAP, Number(city.storedProduction) || 0),
+  );
+  return city.storedProduction;
+}
+export function bankProduction(city, amount) {
+  normalizeStoredProduction(city);
+  const added = Math.max(0, Math.min(Number(amount) || 0, PRODUCTION_BANK_CAP - city.storedProduction));
+  city.storedProduction += added;
+  return added;
+}
+// Apply the bank to the item that was just queued.  Wall repair converts
+// production into wall HP and never receives banked points.
+export function applyStoredProduction(city) {
+  normalizeStoredProduction(city);
+  if (!city.queue || city.queue === "wallRepair" || city.storedProduction <= 0) return 0;
+  const applied = city.storedProduction;
+  city.production = (Number(city.production) || 0) + applied;
+  city.storedProduction = 0;
+  return applied;
+}
+// Instant production from a builder (chop/harvest) flows into the current
+// queue when there is one, otherwise into the bank.
+export function grantInstantProduction(city, amount) {
+  if (city.queue && city.queue !== "wallRepair") {
+    city.production = (Number(city.production) || 0) + amount;
+    return { queued: amount, banked: 0 };
+  }
+  return { queued: 0, banked: bankProduction(city, amount) };
+}
+// The city that receives a builder's chop/harvest yield: the owner's city the
+// tile belongs to, otherwise the owner's nearest living city.
+export function featureRewardCity(g, tile, owner) {
+  const own = g.cities.filter((c) => c.owner === owner && !c.camp && c.hp > 0);
+  return (
+    own.find((c) => tile.cityId && c.id === tile.cityId) ??
+    own.sort((a, b) => distance(a, tile) - distance(b, tile) || a.id.localeCompare(b.id))[0] ??
+    null
+  );
+}
+// Helper for rule NPC builders (npc.mjs is not wired yet): the feature
+// action a builder standing on its tile could issue right now, or null.
+export function builderFeatureAction(g, unit) {
+  if (unit?.type !== "builder" || !(unit.charges > 0)) return null;
+  const view = observe(g, unit.owner);
+  for (const action of ["chop", "harvest"])
+    if (!featureActionIssue(view, unit, action)) {
+      const tile = tileAt(g, unit);
+      return {
+        action,
+        tile: { q: tile.q, r: tile.r, feature: tile.feature ?? null, resource: tile.resource ?? null },
+        cityId: featureRewardCity(g, tile, unit.owner)?.id ?? null,
+        production: action === "chop" ? CHOP_PRODUCTION : HARVEST_PRODUCTION,
+        food: action === "harvest" && tile.feature === "wheat" ? HARVEST_FOOD : 0,
+        resourceAmount: action === "harvest" && tile.resource ? HARVEST_RESOURCE_AMOUNT : 0,
+      };
+    }
+  return null;
 }
 const publicUnit = (u, own, view = {}) => ({
   id: u.id,
@@ -666,27 +741,84 @@ function deterministicTileCity(g, tile, cities = g.cities) {
     )[0] ?? null;
 }
 
+function footprintReach(g, city, assign) {
+  const visited = new Set([key(city)]);
+  const queue = [city];
+  for (let i = 0; i < queue.length; i++)
+    for (const next of neighbors(queue[i])) {
+      const tile = tileAt(g, next);
+      if (!tile || visited.has(key(tile))) continue;
+      if (tile.owner !== city.owner || assign(tile)?.id !== city.id) continue;
+      if (distance(tile, city) > TERRITORY_MAX_RADIUS) continue;
+      visited.add(key(tile));
+      queue.push(tile);
+    }
+  return visited;
+}
+
+// Territory consistency pass for one civilization.  Every owned tile must be
+// hex-connected to the centre of the city administering it.  Stale city ids
+// fall back to the nearest own city; land cut off from its city is handed to
+// an adjacent connected city within range, and whatever remains isolated
+// becomes unowned so captures and demolitions leave no enclaves behind.
+function settleTerritory(g, player) {
+  const cities = g.cities.filter((c) => c.owner === player && !c.camp);
+  const assign = (tile) => deterministicTileCity(g, tile, cities);
+  const dropped = [];
+  for (const t of g.tiles)
+    if (t.owner === player && t.cityId && !cities.some((c) => c.id === t.cityId)) t.cityId = null;
+  const reach = new Map(cities.map((c) => [c.id, footprintReach(g, c, assign)]));
+  const connected = (t) => {
+    const c = assign(t);
+    return Boolean(c && reach.get(c.id)?.has(key(t)));
+  };
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const t of g.tiles) {
+      if (t.owner !== player || connected(t)) continue;
+      const successor = cities
+        .filter((c) => distance(c, t) <= TERRITORY_MAX_RADIUS)
+        .sort((a, b) => distance(a, t) - distance(b, t) || a.id.localeCompare(b.id))
+        .find((c) =>
+          neighbors(t).some((n) => {
+            const x = tileAt(g, n);
+            return x?.owner === player && assign(x)?.id === c.id && reach.get(c.id).has(key(x));
+          }),
+        );
+      if (!successor) continue;
+      t.cityId = successor.id;
+      reach.get(successor.id).add(key(t));
+      changed = true;
+    }
+  }
+  for (const t of g.tiles) {
+    if (t.owner !== player) continue;
+    if (connected(t)) t.cityId ??= assign(t).id;
+    else {
+      t.owner = null;
+      t.cityId = null;
+      dropped.push(t);
+    }
+  }
+  for (const c of cities)
+    if (c.expansionTarget && !expansionCandidates(g, c).some((t) => equal(t, c.expansionTarget)))
+      c.expansionTarget = null;
+  return dropped;
+}
+
 function razeCity(g, player, cityId) {
   const city = g.cities.find(c => c.id === cityId && c.owner === player && !c.camp);
   if (!city) throw new GameError("철거할 본인 도시를 확인해 주세요.");
   const affected = g.tiles.filter(t => t.owner === player && deterministicTileCity(g, t)?.id === cityId);
   g.cities = g.cities.filter(c => c.id !== cityId);
-  // Existing neighbouring cities retain connected land they can administer.
+  // Existing neighbouring cities retain connected land they can administer;
+  // everything else, including land cut off from its city, becomes unowned.
   // Population and unfinished construction are not refunded by demolition.
-  for (const t of affected) { t.owner = null; t.cityId = null; }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const t of affected.filter(t => !t.owner)) {
-      const successor = g.cities.filter(c => c.owner === player && !c.camp && distance(c,t) <= TERRITORY_MAX_RADIUS)
-        .sort((a,b) => distance(a,t)-distance(b,t) || a.id.localeCompare(b.id))
-        .find(c => neighbors(t).some(n => { const x=tileAt(g,n); return x?.owner === player && (x.cityId === c.id || equal(x,c)); }));
-      if (successor) { t.owner = player; t.cityId = successor.id; changed = true; }
-    }
-  }
+  for (const t of affected) t.cityId = null;
+  const dropped = settleTerritory(g, player);
   for (const u of g.units.filter(u => u.homeCityId === cityId)) u.homeCityId = null;
-  for (const c of g.cities) if (c.expansionTarget && !expansionCandidates(g,c).some(t=>equal(t,c.expansionTarget))) c.expansionTarget=null;
-  event(g, [...new Set([player, ...seenBy(g,city)])], `${city.name}을 자진 철거했어요. 도시 인구와 생산은 사라지고 군대는 남아요.`);
+  event(g, [...new Set([player, ...seenBy(g,city)])], `${city.name}을 자진 철거했어요. 도시 인구와 생산은 사라지고 군대는 남아요.${dropped.length ? ` 이어지지 않은 영토 ${dropped.length}칸은 무주지가 됐어요.` : ""}`);
 }
 
 function cityFootprintConnected(g, city, movedTile = null, movedTo = null) {
@@ -1161,11 +1293,13 @@ export function farmYield(g, t, previewOwner = t.owner) {
       deterministicTileCity(g, x, g.cities)?.id === tileCity
     );
   }).length;
+  const wheat = wheatFoodBonus(t);
   return {
     ...terrainYield,
     fertility: t.fertility,
     adjacent,
-    total: terrainYield.base + t.fertility + adjacent,
+    wheat,
+    total: terrainYield.base + t.fertility + adjacent + wheat,
   };
 }
 export function economy(g, player) {
@@ -1386,6 +1520,7 @@ export function economy(g, player) {
     perCity,
   };
 }
+const ANNOUNCEMENT_TURNS = 10;
 export function observe(g, player, now = Date.now()) {
   if (!g.players[player]) throw new GameError("플레이어 권한이 필요해요.", 403);
   ensureGuaranteeState(g);
@@ -1485,7 +1620,13 @@ export function observe(g, player, now = Date.now()) {
     conflicts: g.wars
       .map((k) => k.split("|"))
       .filter(([a, b]) => atWar(g, a, b)),
-    announcements: structuredClone(g.announcements ?? []),
+    // Only recent announcements travel with the observation; older ones are
+    // history and must never be replayed by a client that reloads.
+    announcements: structuredClone(
+      (g.announcements ?? []).filter(
+        (a) => Number(a?.turn ?? g.turn) >= g.turn - ANNOUNCEMENT_TURNS,
+      ),
+    ),
     serverTime: now,
     winner: g.winner,
     ready: g.players[player].ready,
@@ -1520,6 +1661,7 @@ export function observe(g, player, now = Date.now()) {
             cityName: null,
             farm: false,
             developed: false,
+            feature: null,
             ruin: null,
             camp: false,
             visible: false,
@@ -1623,6 +1765,7 @@ export function updateContacts(g) {
           owner: t.owner,
           farm: t.farm,
           developed: t.developed,
+          feature: t.feature ?? null,
           ruin: t.ruin ? structuredClone(t.ruin) : null,
           fort: t.fort ? structuredClone(t.fort) : null,
           encampment: t.encampment ? structuredClone(t.encampment) : null,
@@ -2011,6 +2154,8 @@ export function restoreRuntimeGame(
   }
   normalizeUnitManpower(g);
   ensureEconomyState(g);
+  ensureTileFeatures(g);
+  for (const c of g.cities ?? []) normalizeStoredProduction(c);
   g.factions ??= factionsFor([
     ...Object.keys(g.players),
     "p3",
@@ -2141,6 +2286,8 @@ export function submitOrders(
         throw new GameError(
           "성벽 도시로 2칸 이내 보이는 적에게 턴당 한 번 포격할 수 있어요.",
         );
+      if (rangedTargetIssue(g, c, target))
+        throw new GameError(rangedTargetIssue(g, c, target));
       ids.add(c.id);
       cityShots.push([c, target.id]);
       continue;
@@ -2162,7 +2309,7 @@ export function submitOrders(
         "이번 턴의 행동을 이미 마쳤어요. 다음 턴에 행동력이 회복돼요.",
       );
     if (
-      ["farm", "develop", "fort", "found", "merge", "fortify", "repairStructure"].includes(
+      ["farm", "develop", "chop", "harvest", "fort", "found", "merge", "fortify", "repairStructure"].includes(
         action,
       ) &&
       u.movesLeft <= 0
@@ -2186,6 +2333,8 @@ export function submitOrders(
         "bombard",
         "farm",
         "develop",
+        "chop",
+        "harvest",
         "pillage",
         "scorch",
         "repair",
@@ -2240,6 +2389,8 @@ export function submitOrders(
         throw new GameError("공격 사거리를 확인해 주세요.");
       if (action === "bombard" && u.type !== "artillery")
         throw new GameError("포병만 포격할 수 있어요.");
+      if (rangedTargetIssue(g, u, order.target))
+        throw new GameError(rangedTargetIssue(g, u, order.target));
       if (action === "attack" && u.type === "artillery")
         order.action = "bombard";
       if (order.action === "attack" && !seen.has(key(order.target)))
@@ -2270,6 +2421,10 @@ export function submitOrders(
     }
     if (action === "develop") {
       const issue = constructionIssue(view, u, action);
+      if (issue) throw new GameError(issue);
+    }
+    if (action === "chop" || action === "harvest") {
+      const issue = featureActionIssue(view, u, action);
       if (issue) throw new GameError(issue);
     }
     if (action === "pillage" || action === "scorch") {
@@ -2469,6 +2624,7 @@ export function submitOrders(
     c.productionTarget = target;
     c.manpowerBlocked = false;
     c.productionPending = false;
+    if (!c.camp) applyStoredProduction(c);
   }
   g.stockpiles[player] = stocks;
   const acting = changes.filter(([, order]) => order).map(([u]) => u);
@@ -2479,9 +2635,11 @@ export function submitOrders(
     // An earlier action in this resolution may have broken the wall. The
     // bombardment is disabled immediately rather than firing from wallLevel.
     if (c.hp <= 0 || c.wallHp <= 0) continue;
-    c.attackUsed = true;
     const d = living(g).find((u) => u.id === targetId);
     if (!d) continue;
+    // The target may have moved behind a mountain since the order was given.
+    if (mountainBlocksLine(g, c, d)) continue;
+    c.attackUsed = true;
     const targetCity = g.cities.find(
       (city) => city.hp > 0 && equal(city, d) && atWar(g, c.owner, city.owner),
     );
@@ -2621,6 +2779,32 @@ export function ready(g, player, turn, now = Date.now()) {
     return observe(g, player, now);
   }
   resolveTurn(g, now);
+  return observe(g, player, now);
+}
+export function unready(g, player, turn, now = Date.now()) {
+  if (!simultaneous(g))
+    throw new GameError("교대 턴에서는 턴 종료를 해제할 수 없어요.", 409);
+  if (!g.players?.[player])
+    throw new GameError("플레이어 권한이 필요해요.", 403);
+  if (g.players[player].eliminated)
+    throw new GameError("문명이 멸망했어요. 관전만 할 수 있어요.", 403);
+  if (g.paused)
+    throw new GameError("일시정지 중이에요. 사용자가 재개하면 행동할 수 있어요.", 409);
+  if (g.deadline && now >= g.deadline) {
+    advanceDue(g, now);
+    throw new GameError("이미 정산됐어요. 새 턴을 확인해 주세요.", 409);
+  }
+  if (g.phase !== "planning")
+    throw new GameError("현재 턴 종료를 해제할 수 없는 상태예요.", 409);
+  if (turn !== g.turn)
+    throw new GameError("턴이 바뀌었어요. 새 상태를 확인해 주세요.", 409);
+  if (!directIds(g).includes(player))
+    throw new GameError("직접 조작하는 자리만 턴 종료를 해제할 수 있어요.", 409);
+  if (!g.players[player].ready)
+    throw new GameError("아직 턴을 마치지 않았어요.", 409);
+  g.players[player].ready = false;
+  g.revision++;
+  event(g, [player], "턴 종료를 해제했어요.");
   return observe(g, player, now);
 }
 function event(g, players, text, extra = {}) {
@@ -2868,6 +3052,7 @@ function handleCombat(g, scope = living(g)) {
     // A blocked automatic engagement must not consume the attack or movement
     // opportunity. Revalidate before charging ammo or committing animation.
     if (u.type === "musketeer" && !hasLineOfSight(g, u, target)) continue;
+    if (mountainBlocksLine(g, u, target)) continue;
     const captureTarget = living(g).filter(e => atWar(g, e.owner, u.owner) && equal(e, target))
       .sort((a, b) => Number(isCivilian(a)) - Number(isCivilian(b)))[0];
     const capturing = military(u) && !bombard && captureTarget && isCivilian(captureTarget) && distance(u, target) === 1 &&
@@ -3239,6 +3424,67 @@ function handleCombat(g, scope = living(g)) {
       u.r = u.order.retreat.r;
     }
 }
+function applyFeatureAction(g, u, action) {
+  const t = tileAt(g, u);
+  if (!t || !(u.charges > 0)) return;
+  const city = featureRewardCity(g, t, u.owner);
+  if (!city) return;
+  const grant = (n) => grantInstantProduction(city, n);
+  if (action === "chop") {
+    if (t.feature !== "forest") return;
+    t.feature = null;
+    u.charges--;
+    const gain = grant(CHOP_PRODUCTION);
+    event(
+      g,
+      [u.owner],
+      `${label(u)} 숲을 베었어요 · ${city.name} 생산력 +${CHOP_PRODUCTION}${gain.banked ? " (비축)" : ""}.`,
+      { kind: "chop", cityId: city.id, at: { q: t.q, r: t.r }, production: CHOP_PRODUCTION },
+    );
+    return;
+  }
+  if (t.feature === "wheat") {
+    t.feature = null;
+    u.charges--;
+    let food = HARVEST_FOOD;
+    if (isSupplyOn(g)) {
+      const capacity = cityFoodCapacity(city, 0);
+      city.food = Math.min(capacity, Math.max(0, Number(city.food) || 0) + food);
+    } else {
+      // OFF has no food stock: the lump is a bounded growth contribution.
+      food = Math.min(food, Math.max(0, growthTarget(city.population) - 1 - (Number(city.food) || 0)));
+      city.food = (Number(city.food) || 0) + food;
+      city.growthProgress = Math.max(0, city.food);
+    }
+    const gain = grant(HARVEST_PRODUCTION);
+    event(
+      g,
+      [u.owner],
+      `${label(u)} 밀을 수확했어요 · ${city.name} 식량 +${food} · 생산력 +${HARVEST_PRODUCTION}${gain.banked ? " (비축)" : ""}.`,
+      { kind: "harvest", cityId: city.id, at: { q: t.q, r: t.r }, food, production: HARVEST_PRODUCTION },
+    );
+    return;
+  }
+  if (RESOURCES[t.resource] && !t.developed) {
+    const resource = t.resource;
+    t.resource = null;
+    t.developed = false;
+    u.charges--;
+    g.stockpiles[u.owner] ??= { iron: 0, horses: 0, niter: 0 };
+    const capacity = economy(g, u.owner).resourceCapacity;
+    const amount = Number.isFinite(capacity)
+      ? Math.max(0, Math.min(HARVEST_RESOURCE_AMOUNT, capacity - (g.stockpiles[u.owner][resource] ?? 0)))
+      : HARVEST_RESOURCE_AMOUNT;
+    g.stockpiles[u.owner][resource] = (g.stockpiles[u.owner][resource] ?? 0) + amount;
+    const gain = grant(HARVEST_PRODUCTION);
+    event(
+      g,
+      [u.owner],
+      `${label(u)} ${RESOURCES[resource].name} 매장지를 채굴해 없앴어요 · ${RESOURCES[resource].name} +${amount} · ${city.name} 생산력 +${HARVEST_PRODUCTION}${gain.banked ? " (비축)" : ""}.`,
+      { kind: "harvest", cityId: city.id, at: { q: t.q, r: t.r }, resource, resourceAmount: amount, production: HARVEST_PRODUCTION },
+    );
+  }
+}
 function handleActions(g, scope = living(g), endTurn = false) {
   const used = new Set();
   const merging = new Set(
@@ -3249,11 +3495,11 @@ function handleActions(g, scope = living(g), endTurn = false) {
   for (const u of [...scope].filter((u) => u.hp > 0)) {
     if (used.has(u.id)) continue;
     const a = u.order?.action;
-    if (["farm", "develop", "pillage", "scorch", "repair", "repairStructure", "fort", "found", "merge", "fortify"].includes(a)) {
+    if (["farm", "develop", "chop", "harvest", "pillage", "scorch", "repair", "repairStructure", "fort", "found", "merge", "fortify"].includes(a)) {
       u.movesLeft = 0;
       u.acted = true;
     }
-    if (["farm", "develop", "pillage", "scorch", "repair", "repairStructure", "fort", "found"].includes(a))
+    if (["farm", "develop", "chop", "harvest", "pillage", "scorch", "repair", "repairStructure", "fort", "found"].includes(a))
       for (const p of observerIds(g))
         if (p === u.owner || visibility(g, p).has(key(u)))
           g.effects[p].push({
@@ -3303,12 +3549,14 @@ function handleActions(g, scope = living(g), endTurn = false) {
         );
       }
     }
+    if (a === "chop" || a === "harvest") applyFeatureAction(g, u, a);
     if (a === "farm") {
       const t = tileAt(g, u);
       if (
         u.charges > 0 &&
         t.owner === u.owner &&
         !t.farm &&
+        t.feature !== "forest" &&
         !g.cities.some((c) => equal(c, u))
       ) {
         t.farm = true;
@@ -3398,6 +3646,7 @@ function handleActions(g, scope = living(g), endTurn = false) {
       g.cities.push(city);
       tileAt(g, u).farm = false;
       tileAt(g, u).developed = false;
+      tileAt(g, u).feature = null;
       tileAt(g, u).fort = null;
       territory(g, city, { initial: true });
       if (isExpansion(g)) g.founded[u.owner] = true;
@@ -3458,6 +3707,9 @@ function handleActions(g, scope = living(g), endTurn = false) {
     }
     if (c.hp === 0 && invader) {
       const old = c.owner;
+      const transferred = g.tiles.filter(
+        (t) => t.owner === old && (t.cityId === c.id || (!t.cityId && deterministicTileCity(g, t)?.id === c.id)),
+      );
       releaseReservedManpower(c);
       for (const garrison of g.units.filter((u) => u.hp > 0 && equal(u, c) && u.id !== invader.id)) {
         if (!atWar(g, garrison.owner, invader.owner)) continue;
@@ -3498,12 +3750,21 @@ function handleActions(g, scope = living(g), endTurn = false) {
       c.productionTargetWallMaxHp = null;
       c.lastIncomingAttackTurn = g.turn;
       c.attackUsed = true;
+      // Every tile administered by the city changes hands with it, so no
+      // land stays registered to the captured city under its old owner.
+      for (const t of transferred) { t.owner = invader.owner; t.cityId = c.id; }
       for (const t of g.tiles) if (t.cityId === c.id) t.owner = invader.owner;
+      const lost = settleTerritory(g, old);
+      const floating = settleTerritory(g, invader.owner);
       if (isExpansion(g)) g.founded[invader.owner] = true;
+      const notes = [];
+      if (transferred.length) notes.push(`영토 ${transferred.length}칸이 함께 넘어갔어요.`);
+      if (lost.length || floating.length)
+        notes.push(`도시와 이어지지 않은 영토 ${lost.length + floating.length}칸은 무주지가 됐어요.`);
       event(
         g,
         [old, invader.owner, ...seenBy(g, c)],
-        `${c.name} 도시가 점령됐어요.`,
+        [`${c.name} 도시가 점령됐어요.`, ...notes].join(" "),
       );
     }
   }
@@ -3676,6 +3937,7 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
       }
       const values = settledEconomy.perCity.find((x) => x.id === c.id);
       settleGrowth(g, c, values.foodNet, p, values);
+      if (!c.queue) bankProduction(c, values.productionRate);
       if (c.queue) {
         if (c.queue === "wallRepair") {
           if (c.productionTarget) {
@@ -3728,9 +3990,18 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
           }
           continue;
         }
-        c.production = Math.min(
-          productionType(c.queue, c).cost,
-          c.production + values.productionRate,
+        const productionBefore = Number(c.production) || 0;
+        const itemCost = productionType(c.queue, c).cost;
+        // Instant grants (bank, chop, harvest) may already exceed the cost;
+        // that excess is re-banked at once so a blocked item never eats it.
+        const excessBefore = Math.max(0, productionBefore - itemCost);
+        bankProduction(c, excessBefore);
+        c.production = Math.min(itemCost, productionBefore + values.productionRate);
+        // This turn's overflow beyond the cost is banked only when the item
+        // actually completes; a blocked item never accumulates it.
+        const productionOverflow = Math.max(
+          0,
+          productionBefore - excessBefore + values.productionRate - c.production,
         );
         if (["tradingPost", "encampment"].includes(c.queue)) {
           const type = c.queue;
@@ -3750,6 +4021,7 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
           c.productionTarget = null;
           c.productionBlocked = null;
           c.productionPending = true;
+          bankProduction(c, productionOverflow);
           event(g, [p], `${c.name} ${productionType(type, c).name} 건설 완료.`);
           continue;
         }
@@ -3764,6 +4036,7 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
           c.production = 0;
           c.queue = null;
           c.productionPending = true;
+          bankProduction(c, productionOverflow);
           c.lastProduction = { type: "walls", turn: g.turn };
           event(g, [p], `${c.name} 성벽 ${c.wallLevel}레벨 증축 완료.`);
           continue;
@@ -3814,6 +4087,8 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
             Object.assign(produced, unitManpower(g, c, p));
             if (type === "merchant") produced.tradingPostCityId = c.id;
             c.production -= productionType(type, c).cost;
+            bankProduction(c, Math.max(0, c.production) + productionOverflow);
+            c.production = 0;
             c.queue = null;
             c.manpowerReserved = 0;
             c.manpowerBlocked = false;
@@ -4257,7 +4532,7 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
         (c) => c.owner === p && c.hp > 0 && c.wallHp > 0 && !c.attackUsed,
       )) {
         const target = observe(g, p, now)
-          .units.filter((u) => u.hostile && distance(u, c) <= 2)
+          .units.filter((u) => u.hostile && distance(u, c) <= 2 && !mountainBlocksLine(g, c, u))
           .sort((a, b) => a.hp - b.hp || (a.type === "artillery" ? -1 : 1))[0];
         if (target)
           attempt(() =>
@@ -5109,15 +5384,36 @@ function diplomaticAction(g, player, raw) {
   }
   return true;
 }
+
+// Cheap fingerprint of everything a realtime NPC step can change that a
+// client would need to see. Deliberately excludes timers.
+function realtimeSignature(g) {
+  let h = 0;
+  const mix = (str) => {
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  };
+  for (const u of g.units ?? [])
+    mix(`${u.id}:${u.owner}:${u.q}:${u.r}:${u.hp}:${u.size}:${u.fortified ? 1 : 0}:${u.order?.action ?? ""}:${u.q}`);
+  for (const c of g.cities ?? [])
+    mix(`${c.id}:${c.owner}:${c.hp}:${c.wallHp}:${c.population}:${c.queue ?? ""}:${c.production}`);
+  mix(`${(g.wars ?? []).join(",")}|${(g.proposals ?? []).length}|${(g.announcements ?? []).length}|${(g.effects ?? []).length}|${g.phase}|${g.winner ?? ""}`);
+  for (const [p, list] of Object.entries(g.events ?? {})) mix(`${p}:${Array.isArray(list) ? list.length : 0}`);
+  for (const [p, list] of Object.entries(g.tradeNotices ?? {})) mix(`${p}:${Array.isArray(list) ? list.length : 0}`);
+  return h;
+}
 export function advanceDue(g, now = Date.now()) {
   if (!g.internalNpc && !g.paused && g.phase === "planning" && simultaneous(g) &&
       g.deadline && now < g.deadline && now >= (g.npcNextActionAt ?? g.turnStartedAt + 1000)) {
     g.npcNextActionAt = now + 1000;
+    const before = realtimeSignature(g);
     beginEffects(g);
     playNpcs(g, now, null, { realtime: true });
     updateContacts(g);
     checkVictory(g);
-    g.revision++;
+    // Only wake clients when the realtime NPC step actually changed something;
+    // an idle tick used to bump the revision every second and force every
+    // browser to refetch and re-render the whole observation.
+    if (realtimeSignature(g) !== before) g.revision++;
   }
   if (
     !g.paused &&

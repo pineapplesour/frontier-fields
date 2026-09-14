@@ -10,6 +10,7 @@ import {
   START_GRACE_TURNS,
 } from "../shared/rules.js";
 import { seatFactions } from "./lobby.mjs";
+import { seedTileFeatures } from "./features.mjs";
 
 function safeCampSite(g, col, row) {
   const desired = fromOffset(col, row);
@@ -202,6 +203,7 @@ export function populateWorld(g, random, addUnit, territory) {
   for (const t of g.tiles.filter((t) => t.q === 7 || t.q === 12))
     for (const n of neighbors(t).filter((n) => n.q === t.q + 1 && tileAt(n)))
       g.rivers.push({ a: { q: t.q, r: t.r }, b: n });
+  seedTileFeatures(g);
 }
 
 const terrainFor = (random) => {
@@ -376,4 +378,5 @@ export function populateExpansionWorld(g, random, addUnit, territory, seats) {
         t.fertility ||= 2;
       }
     }
+  seedTileFeatures(g);
 }
