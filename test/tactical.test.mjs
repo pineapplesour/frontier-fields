@@ -339,8 +339,13 @@ test("combined peace quote and acceptance match and cannot automatically resume 
     peace: true,
     give: { resources: { iron: 2 } },
   };
-  assert.equal(previewDeal(g, "p1", raw).additionalGold, 26);
-  raw.give.gold = 26;
+  // Peace carries no price of its own; only requested assets are valued.
+  const quote = previewDeal(g, "p1", raw);
+  assert.equal(quote.additionalGold, 0);
+  assert.equal(quote.wouldAccept, true);
+  raw.receive = { gold: 28 };
+  assert.equal(previewDeal(g, "p1", raw).additionalGold, 14);
+  raw.give.gold = 14;
   trade(g, "offerDeal", raw);
   assert.ok(!g.wars.includes("p1|p3"));
   g.turn = 10;

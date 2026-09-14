@@ -630,33 +630,67 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
                 ? "상대의 직접 수락이 필요해요."
                 : currentQuote?.status === "insufficient"
                   ? "대가를 더 제시해 주십시오."
-                  : "협상 조건"}
+                  : currentQuote?.never
+                    ? "이 조건으로는 절대 수락하지 않아요."
+                    : "협상 조건"}
           </strong>
           <p>{currentQuote?.message ?? "조건을 확인하고 있어요…"}</p>
+          {currentQuote && currentQuote.wouldAccept !== null && currentQuote.wouldAccept !== undefined ? (
+            <p
+              className={`npc-verdict ${currentQuote.wouldAccept ? "yes" : "no"}`}
+              data-testid="npc-verdict"
+            >
+              {currentQuote.wouldAccept
+                ? "지금 제안하면 바로 수락해요."
+                : currentQuote.never
+                  ? `절대 수락하지 않아요 · ${currentQuote.reason ?? ""}`
+                  : currentQuote.reason ?? "지금은 수락하지 않아요."}
+            </p>
+          ) : null}
         </div>
-        <button
-          className="soft-button"
-          disabled={
-            disabled ||
-            !currentQuote?.additionalGold ||
-            !currentQuote.canAfford
-          }
-          data-tip="상대가 수락하는 데 필요한 추가 골드를 현재 제안에 반영해요. 사람 상대의 수락은 예측하지 않아요."
-          onClick={() => {
-            setGive((s) => ({
-              ...s,
-              gold: s.gold + currentQuote.additionalGold,
-            }));
-            setReview(false);
-          }}
-        >
-          뭘 원하십니까?
-          <small>
-            {currentQuote?.additionalGold > 0
-              ? `골드 +${currentQuote.additionalGold}${currentQuote.canAfford ? " 반영" : " · 보유량 부족"}`
-              : "추가 조건 확인"}
-          </small>
-        </button>
+        {(() => {
+          const demands = currentQuote?.demands;
+          const gold = demands?.gold ?? 0;
+          const resourceList = Object.entries(demands?.resources ?? {}).filter(([, n]) => n > 0);
+          const canFillGold = gold > 0 && currentQuote.canAfford;
+          const canFillResources = resourceList.length > 0 && !canFillGold;
+          const fillable = canFillGold || canFillResources;
+          return (
+            <button
+              className="soft-button"
+              data-testid="auto-fill-demands"
+              disabled={disabled || !fillable}
+              data-tip="상대가 지금 수락하는 데 필요한 골드(부족하면 동등 가치의 자원)를 현재 제안에 자동으로 채워요. 사람 상대의 수락은 예측하지 않아요."
+              onClick={() => {
+                setGive((s) =>
+                  canFillGold
+                    ? { ...s, gold: s.gold + gold }
+                    : {
+                        ...s,
+                        resources: Object.fromEntries(
+                          [...new Set([...Object.keys(s.resources), ...resourceList.map(([r]) => r)])].map((r) => [
+                            r,
+                            (s.resources[r] ?? 0) + (demands.resources[r] ?? 0),
+                          ]),
+                        ),
+                      },
+                );
+                setReview(false);
+              }}
+            >
+              상대 요구 조건 자동 채우기
+              <small>
+                {canFillGold
+                  ? `골드 +${gold} 반영`
+                  : canFillResources
+                    ? `자원 ${resourceList.map(([r, n]) => `${RESOURCES[r].name} +${n}`).join(" · ")} 반영`
+                    : gold > 0
+                      ? `골드 +${gold} · 보유량 부족`
+                      : "추가 조건 없음"}
+              </small>
+            </button>
+          );
+        })()}
       </div>
       {review ? (
         <div className="deal-review">

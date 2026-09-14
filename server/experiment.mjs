@@ -9,7 +9,7 @@ const limits = {
   movement: [0, 100], attacks: [0, 100], attack: [0, 1000],
   defense: [1, 1000], maxHealth: [1, 10000],
   isolationPenalty: [0, 90], riverPenalty: [0, 90],
-  crossingPenalty: [0, 90], woundedPenalty: [0, 90], jointPenalty: [0, 90],
+  crossingPenalty: [0, 90], woundedPenalty: [0, 100], jointPenalty: [0, 90],
 };
 
 export function refreshExperimentUnit(g, unit) {

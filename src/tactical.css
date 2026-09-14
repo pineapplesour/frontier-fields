@@ -143,19 +143,6 @@
   color: #357761;
   border-radius: 8px;
 }
-.combat-preview {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  right: auto;
-  bottom: auto;
-  transform: translate(-50%, -50%);
-  width: min(350px, calc(100vw - 28px));
-  background: #fff;
-  box-shadow: 0 10px 40px #20392b26;
-  z-index: 12;
-  pointer-events: none;
-}
 .city-label.ghost-city {
   color: #78817b;
   background: #f3f3eae8;
@@ -361,9 +348,6 @@
     right: 12px;
     top: 219px;
   }
-  .combat-preview {
-    top: 46%;
-  }
   .modal.wide {
     width: calc(100vw - 16px);
   }
@@ -421,3 +405,10 @@
     animation: none;
   }
 }
+.negotiation-status .npc-verdict {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.negotiation-status .npc-verdict.yes { color: #277d5d; }
+.negotiation-status .npc-verdict.no { color: #a34a35; }

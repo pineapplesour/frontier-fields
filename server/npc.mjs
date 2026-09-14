@@ -21,13 +21,66 @@ import {
   maxHealth,
   settlementIssue,
 } from "../shared/rules.js";
-import { combatPreview, unitDamage } from "../shared/combat.js";
+import { combatPreview, unitDamage, unfavorableFight } from "../shared/combat.js";
 import { npcWarRisk, npcGuaranteeDecision } from "./guarantees.mjs";
 import {
   encampmentCandidates,
   structureProductionDefinition,
 } from "./militaryStructures.mjs";
 const NPCS = ["p3", "p4", "cs", "barb"];
+// Strategic thresholds for rule-based NPC military decisions.  Every value is
+// an observation-scoped heuristic; nothing here reads hidden enemy state.
+export const NPC_STRATEGY = Object.freeze({
+  // --- pillage policy -------------------------------------------------------
+  PILLAGE_HEAL: 50, // engine heals +50 HP on pillage/scorch
+  SIEGE_HEAL_RATIO: 0.5, // siege mode: only a unit below this HP ratio pillages (for the heal)
+  STARVE_STRIKE_RATIO: 0.75, // strike < defense * ratio  => cannot take the city soon => starve mode
+  STRIKE_READY_RATIO: 1.0, // strike >= defense * ratio  => the army may show itself and assault
+  STRIKE_RADIUS: 5, // allies within this range of the target city count as the strike force
+  RAID_RADIUS: 3, // enemy improvements within this range of the target city are its farmland
+  TARGET_CITY_RANGE: 7, // nearest hostile city within this range is the unit's war target
+  RAID_MIN_HP_RATIO: 0.5, // a raider below this ratio stops raiding (it pillages only where it stands)
+  RAID_APPROACH_DANGER_RATIO: 0.5, // approach step danger must stay below hp * ratio
+  LETHAL_DANGER_RATIO: 0.6, // expected damage >= hp * ratio counts as lethal fire cover
+  HEAL_PILLAGE_DANGER_SLACK: 8, // a heal-pillage step may be at most this much more dangerous than staying
+  KEY_POSITION_THREAT_RANGE: 3, // a unit on a city/structure with foes this close holds it
+  // --- favorable ground -----------------------------------------------------
+  GROUND_HILLS: 4,
+  GROUND_OWN_TERRITORY: 2,
+  GROUND_STRUCTURE: 3,
+  GROUND_CITY: 3,
+  FIRING_GROUND_WEIGHT: 0.6, // ground value weight when choosing a firing position
+  UNFAVORABLE_TRADE_RATIO: 1.3, // received * ratio > dealt => bad trade (only a kill or a free shot allows it)
+  OUTGUNNED_RATIO: 1.2, // local enemy power > ours * ratio => hold favorable ground instead of closing
+  OUTGUNNED_GROUND_WEIGHT: 2.5,
+  OUTGUNNED_CONTACT_PENALTY: 10, // do not step adjacent to a superior enemy
+  // --- defense of own cities and improvements -------------------------------
+  GARRISON_THREAT_RANGE: 4, // foes this close to an empty own city summon the nearest garrison
+  RAIDER_INTERCEPT_RANGE: 4, // foes this close to own farms/resources are treated as raiders
+  DEFENDERS_PER_RAIDER: 2,
+  COVER_WEIGHT: 2, // value per own improvement covered (within 1) by a position
+  // --- key positions and concealment ----------------------------------------
+  THREAT_RANGE: 8, // foes this close to home trigger key-position pre-emption
+  KEY_TILE_RANGE: 3, // key tiles lie within this range of the home city
+  CITY_VISION: 3, // enemy cities see this far (mirrors engine visibility)
+  HIDE_PENALTY: 16, // rank penalty for standing in enemy vision while the strike is not ready
+  STAGING_DISTANCE: 4, // offensive march stops on this ring around the objective (just outside city vision)
+  MERGE_MIN_ARMY: 4, // quiet-time merging into brigades/divisions starts at this army size
+  // --- growth and buildup ---------------------------------------------------
+  MAX_CITIES: 4, // NPC civs found up to this many cities
+  ARMY_PER_CITY: 2, // baseline army size per city
+  ARMY_POP_DIVISOR: 3, // plus one unit per this much population
+  ARMY_PARITY_RATIO: 1.0, // keep army power >= strongest neighbour's visible power * ratio
+  NEIGHBOUR_RANGE: 8, // a civ with cities/units this close to ours is a neighbour
+  // --- offensives (never a warmonger) --------------------------------------
+  TEMPERAMENT: Object.freeze({ default: 0.3, p3: 0.35, p4: 0.3 }), // aggression 0..1
+  OFFENSE_ADVANTAGE_BASE: 1.6, // required own/their power ratio at aggression 1
+  OFFENSE_ADVANTAGE_SCALE: 0.8, // added requirement per (1 - aggression)
+  CITY_DEFENSE_WEIGHT: 0.4, // city hp + wall hp counted at this weight in their power
+  EXPOSED_IMPROVEMENTS_MIN: 2, // exposed enemy farms/resources needed for an economic casus belli
+  MIN_OFFENSIVE_ARMY: 5,
+  MIN_OFFENSIVE_POWER: 110,
+});
 const factionList = (view) =>
   Array.isArray(view?.factions)
     ? view.factions
@@ -121,6 +174,9 @@ export function settlementSites(view, settler) {
           owner: view.playerId,
         }) &&
         (!own.length || own.some((c) => distance(c, t) <= 8)) &&
+        // Remembered (ghost) cities also enforce the 4-tile spacing, so a site
+        // does not flip between valid and invalid as fog moves with the settler.
+        !(view.cityContacts ?? []).some((c) => distance(c, t) < 4) &&
         !view.units.some((e) => equal(e, t) && blocksUnit(settler, e)) &&
         threats.every((e) => distance(e, t) > TYPES[e.type].range + 1),
     )
@@ -177,6 +233,36 @@ export function npcEconomy(view) {
   const stocks = { ...view.economy.resources },
     plans = [];
   let gold = view.economy.gold;
+  // Buildup target: proportional to the economy and to the strongest visible
+  // neighbour, so the army keeps pace instead of stalling at a token guard.
+  const S = NPC_STRATEGY;
+  const armyPower = army.reduce((n, u) => n + power(u), 0);
+  const neighbourPower = Math.max(
+    0,
+    ...factionList(view)
+      .filter((f) => f.id !== own && f.id !== "barb")
+      .map((f) =>
+        (view.units ?? [])
+          .filter(
+            (u) =>
+              u.owner === f.id &&
+              military(u) &&
+              cities.some((c) => distance(c, u) <= S.NEIGHBOUR_RANGE),
+          )
+          .reduce((n, u) => n + power(u), 0),
+      ),
+  );
+  const armyTarget =
+    cities.length * S.ARMY_PER_CITY +
+    Math.ceil((view.economy.population ?? 0) / S.ARMY_POP_DIVISOR);
+  const armyShort =
+    army.length < armyTarget || armyPower < neighbourPower * S.ARMY_PARITY_RATIO;
+  const capacityOk = () =>
+    view.economy.capacity == null ||
+    view.economy.used +
+      plans.filter((p) => p.production && p.production[0].type !== "walls")
+        .length <
+      view.economy.capacity - 1;
   for (const c of cities) {
     const localFoes = foes.filter((e) => distance(e, c) <= 4);
     const localArmy = army.filter((e) => distance(e, c) <= 4);
@@ -209,7 +295,7 @@ export function npcEconomy(view) {
     const settlementReady =
       view.turn >= 1 &&
       c.population >= 3 &&
-      cities.length < 3 &&
+      cities.length < NPC_STRATEGY.MAX_CITIES &&
       count("settler") === 0 &&
       // One surviving escort and one established farm are enough to start a
       // legal second-city attempt. Requiring a full three-unit army made an
@@ -242,20 +328,17 @@ export function npcEconomy(view) {
     ) {
       type = "encampment";
       target = point(encampmentTarget);
-    } else if (
+    } else if (armyShort && count("builder") >= 1 && capacityOk())
+      type = counter();
+    else if (
       jobs > 0 &&
       count("builder") < Math.min(cities.length + 1, Math.ceil(jobs / 6))
     )
       type = "builder";
-    else if (
-      view.economy.capacity == null ||
-      view.economy.used +
-        plans.filter((p) => p.production && p.production[0].type !== "walls")
-          .length <
-        view.economy.capacity - 1
-    )
-      type = counter();
+    else if (capacityOk()) type = counter();
     else if ((c.wallLevel ?? 0) < 3) type = "walls";
+    // Never leave a city idle: keep builders working while the army is capped.
+    else if (jobs > 0) type = "builder";
     if (!type) continue;
     const definition =
       productionType(type, c) ?? structureProductionDefinition(type, c);
@@ -343,6 +426,8 @@ export function npcUnitOrder(view, id) {
   if (!isNpc(view)) return null;
   const u = view.units.find((u) => u.id === id && u.owner === view.playerId);
   if (!u || u.attackUsed) return null;
+  // A pending pillage/scorch resolves at end of turn; never override it.
+  if (["pillage", "scorch"].includes(u.order?.action)) return null;
   const { allies, foes, cities, enemyCities, tiles, home, support, danger } =
     context(view, u);
   const t = tiles.get(key(u)),
@@ -382,24 +467,22 @@ export function npcUnitOrder(view, id) {
     .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))[0];
   const hostileOwner =
     t?.owner && factionList(view).some((f) => f.id === t.owner && f.hostile);
-  // Improvement actions are observation-scoped.  NPCs may plunder a visible
-  // hostile facility when damaged, and may scorch their own farm only when a
-  // detailed-supply emergency makes the one-time food/heal trade strategic;
-  // they never routine-destroy healthy infrastructure for cash.
+  // Improvement actions are observation-scoped.  A hostile facility is only
+  // plundered through the strategic pillage policy below; NPCs may scorch
+  // their own farm only when a detailed-supply emergency makes the one-time
+  // food/heal trade strategic.  They never routine-destroy healthy
+  // infrastructure for cash.
   if (
     military(u) &&
     t &&
     (t.farm || t.developed) &&
+    !t.ruin &&
     ratio < 0.8 &&
-    (hostileOwner ||
-      (t.owner === u.owner &&
-        view.economy.supplyMode === "on" &&
-        localCity?.foodStock <= localCity?.foodConsumption))
+    t.owner === u.owner &&
+    view.economy?.supplyMode === "on" &&
+    localCity?.foodStock <= localCity?.foodConsumption
   )
-    return {
-      unitId: id,
-      action: hostileOwner ? "pillage" : "scorch",
-    };
+    return { unitId: id, action: "scorch" };
   const retreat = () => {
     if (u.movesLeft <= 0) return null;
     const rank = (p) =>
@@ -418,6 +501,222 @@ export function npcUnitOrder(view, id) {
       ? moveTo(best)
       : fortify();
   };
+
+  // ---- Strategic layer: pillage policy, favorable ground, defense duties,
+  // key positions and concealment.  All inputs are the NPC's own observation.
+  const S = NPC_STRATEGY;
+  const atWarWith = (owner) =>
+    !!owner && owner !== u.owner && !!factionFor(view, owner)?.hostile;
+  const isCityTile = (p) => view.cities.some((c) => equal(c, p));
+  const improvement = (p) =>
+    !!p && (p.farm || p.developed) && !p.ruin && !isCityTile(p);
+  const enemyImprovement = (p) =>
+    improvement(p) && p.explored !== false && atWarWith(p.owner);
+  const ownImprovement = (p) => improvement(p) && p.owner === u.owner;
+  const blocked = (p) =>
+    view.units.some((e) => e.id !== u.id && equal(e, p) && blocksUnit(u, e));
+  const lethal = (p, hp = u.hp) => danger(p) >= hp * S.LETHAL_DANGER_RATIO;
+  const ownStructure = (p) => {
+    const structure = structureAt(view, p);
+    return (
+      !!structure &&
+      structure.owner === u.owner &&
+      (structure.hp > 0 || structure.wallHp > 0)
+    );
+  };
+  const ground = (p) =>
+    (p.terrain === "hills" ? S.GROUND_HILLS : 0) +
+    (p.owner === u.owner ? S.GROUND_OWN_TERRITORY : 0) +
+    (ownStructure(p) ? S.GROUND_STRUCTURE : 0) +
+    (cities.some((c) => equal(c, p)) ? S.GROUND_CITY : 0);
+  const cover = (p) =>
+    view.tiles.filter((x) => ownImprovement(x) && distance(x, p) <= 1).length;
+  const holdingKeyPosition =
+    (cities.some((c) => equal(c, u)) || ownStructure(t)) &&
+    foes.some((e) => distance(e, u) <= S.KEY_POSITION_THREAT_RANGE);
+  const seenByEnemy = (p) =>
+    foes.some((e) => distance(e, p) <= TYPES[e.type].vision) ||
+    enemyCities.some((c) => distance(c, p) <= S.CITY_VISION);
+  const strikeAt = (c) =>
+    allies
+      .filter((e) => military(e) && distance(e, c) <= S.STRIKE_RADIUS)
+      .reduce((n, e) => n + power(e), 0);
+  const defenseAt = (c) =>
+    (c.hp ?? 0) +
+    (c.wallHp ?? 0) +
+    foes.filter((e) => distance(e, c) <= 1).reduce((n, e) => n + power(e), 0);
+  const targetCity =
+    enemyCities
+      .filter((c) => !c.camp && distance(c, u) <= S.TARGET_CITY_RANGE)
+      .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))[0] ??
+    null;
+  const strikeReady = targetCity
+    ? strikeAt(targetCity) >= defenseAt(targetCity) * S.STRIKE_READY_RATIO
+    : true;
+  const warMode = !targetCity
+    ? null
+    : strikeAt(targetCity) < defenseAt(targetCity) * S.STARVE_STRIKE_RATIO
+      ? "starve"
+      : "siege";
+  const healedHp = Math.min(maxHealth(u), u.hp + S.PILLAGE_HEAL);
+  const pillageHere = () =>
+    enemyImprovement(t) && !lethal(t, healedHp)
+      ? { unitId: id, action: "pillage" }
+      : null;
+  // Leave hostile ground after a raid: away from fire, toward home.
+  const withdraw = () => {
+    if (u.movesLeft <= 0) return fortify();
+    const rank = (p) =>
+      -danger(p) * 1.5 +
+      (home ? -distance(p, home) * 2 : 0) +
+      (p.owner === u.owner ? 4 : 0) +
+      (atWarWith(p.owner) ? -3 : 0) +
+      (p.terrain === "hills" ? 2 : 0);
+    const best = view.tiles
+      .filter((p) => reach.has(key(p)) && p.explored && !blocked(p))
+      .sort((a, b) => rank(b) - rank(a) || stable(a, b))[0];
+    return best && !equal(best, u) && rank(best) > rank(t)
+      ? moveTo(best)
+      : fortify();
+  };
+  // Defense duties: one garrison per threatened empty city, and up to
+  // DEFENDERS_PER_RAIDER interceptors per raider approaching own improvements.
+  const duty = () => {
+    if (!military(u) || u.owner === "barb") return null;
+    const defenders = allies
+      .filter((e) => military(e) && e.type !== "artillery")
+      .sort(stable);
+    for (const c of cities
+      .slice()
+      .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))) {
+      if (!foes.some((e) => distance(e, c) <= S.GARRISON_THREAT_RANGE))
+        continue;
+      if (allies.some((e) => military(e) && e.id !== id && equal(e, c)))
+        continue;
+      const nearest = defenders
+        .slice()
+        .sort((a, b) => distance(a, c) - distance(b, c) || stable(a, b))[0];
+      if (nearest?.id !== id) continue;
+      if (equal(u, c)) return { hold: true, city: c };
+      if (u.movesLeft <= 0) return null;
+      if (reach.has(key(c)) && !blocked(c)) return { order: moveTo(c) };
+      const step = view.tiles
+        .filter(
+          (p) => reach.has(key(p)) && p.explored && !blocked(p) && !lethal(p),
+        )
+        .sort(
+          (a, b) =>
+            distance(a, c) - distance(b, c) || danger(a) - danger(b) || stable(a, b),
+        )[0];
+      return step && distance(step, c) < distance(u, c)
+        ? { order: moveTo(step) }
+        : null;
+    }
+    const raiders = foes
+      .filter((e) =>
+        view.tiles.some(
+          (p) => ownImprovement(p) && distance(e, p) <= S.RAIDER_INTERCEPT_RANGE,
+        ),
+      )
+      .sort(stable);
+    for (const raider of raiders) {
+      const assigned = defenders
+        .slice()
+        .sort(
+          (a, b) => distance(a, raider) - distance(b, raider) || stable(a, b),
+        )
+        .slice(0, S.DEFENDERS_PER_RAIDER);
+      if (!assigned.some((e) => e.id === id)) continue;
+      const farm = view.tiles
+        .filter((p) => ownImprovement(p))
+        .sort(
+          (a, b) =>
+            distance(a, raider) - distance(b, raider) || stable(a, b),
+        )[0];
+      if (!farm) continue;
+      const rank = (p) =>
+        ground(p) +
+        cover(p) * S.COVER_WEIGHT -
+        distance(p, farm) * 2 -
+        Math.max(0, distance(p, raider) - def.range) * 1.5 -
+        danger(p) * 0.3;
+      if (u.movesLeft <= 0) return { hold: true, raider };
+      const best = [t, ...view.tiles.filter(
+        (p) => reach.has(key(p)) && p.explored && !blocked(p) && !lethal(p),
+      )].sort((a, b) => rank(b) - rank(a) || stable(a, b))[0];
+      return best && !equal(best, u) && rank(best) > rank(t) + 1
+        ? { order: moveTo(best) }
+        : { hold: true, raider };
+    }
+    return null;
+  };
+  const assigned = duty();
+  // Pillage policy.  Starve mode: the city cannot be taken soon, so raid its
+  // farmland and leave.  Siege mode: keep the improvements intact while
+  // healthy; a hurt unit on/next to one plunders it for the +50 heal when
+  // that is safer than a long retreat.  Never on non-war owners, never under
+  // lethal fire, never while holding a key position.
+  const pillagePlan = () => {
+    if (!military(u)) return null;
+    if (warMode === "starve" && u.type !== "artillery" && !assigned) {
+      const here = pillageHere();
+      if (here) return here;
+      if (ratio < S.RAID_MIN_HP_RATIO) return null;
+      const zone = view.tiles.filter(
+        (p) => enemyImprovement(p) && distance(p, targetCity) <= S.RAID_RADIUS,
+      );
+      if (!zone.length) return atWarWith(t?.owner) ? withdraw() : null;
+      if (holdingKeyPosition || u.movesLeft <= 0) return null;
+      const now = zone
+        .filter(
+          (p) => reach.has(key(p)) && !blocked(p) && !lethal(p, healedHp),
+        )
+        .sort(
+          (a, b) =>
+            danger(a) - danger(b) ||
+            reach.get(key(a)).cost - reach.get(key(b)).cost ||
+            stable(a, b),
+        );
+      if (now[0]) return moveTo(now[0]);
+      const goal = zone
+        .slice()
+        .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))[0];
+      const step = view.tiles
+        .filter(
+          (p) =>
+            reach.has(key(p)) &&
+            p.explored &&
+            !blocked(p) &&
+            !equal(p, u) &&
+            danger(p) < u.hp * S.RAID_APPROACH_DANGER_RATIO,
+        )
+        .sort(
+          (a, b) =>
+            distance(a, goal) - distance(b, goal) ||
+            danger(a) - danger(b) ||
+            stable(a, b),
+        )[0];
+      if (step && distance(step, goal) < distance(u, goal)) return moveTo(step);
+      return atWarWith(t?.owner) ? withdraw() : null;
+    }
+    if (ratio >= S.SIEGE_HEAL_RATIO) return null;
+    const here = pillageHere();
+    if (here) return here;
+    if (holdingKeyPosition || u.movesLeft <= 0) return null;
+    const beside = neighbors(u)
+      .map((n) => tiles.get(key(n)))
+      .filter(
+        (p) =>
+          p &&
+          enemyImprovement(p) &&
+          reach.has(key(p)) &&
+          !blocked(p) &&
+          !lethal(p, healedHp) &&
+          danger(p) <= danger(t) + S.HEAL_PILLAGE_DANGER_SLACK,
+      )
+      .sort((a, b) => danger(a) - danger(b) || stable(a, b));
+    return beside[0] ? moveTo(beside[0]) : null;
+  };
   const enemies = [...view.units.filter((e) => e.hostile), ...enemyCities];
   const targets = enemies.filter((e) => distance(e, u) <= 5);
   const attacks = enemies
@@ -432,9 +731,17 @@ export function npcUnitOrder(view, id) {
         (x.e.type === "artillery" ? 14 : 0),
     }))
     .sort((a, b) => b.score - a.score || stable(a.e, b.e));
+  // A bad trade (heavy retaliation, counter-type, larger formation, uphill or
+  // across a river) is only taken for a kill or when nothing is received.
+  const badTrade = (x) =>
+    x.e.hp > x.preview.dealt[0] &&
+    x.preview.received[1] > 0 &&
+    (x.preview.received[1] * S.UNFAVORABLE_TRADE_RATIO > x.preview.dealt[0] ||
+      (!!x.e.type && unfavorableFight(view, u, x.e, true)));
   const shot = attacks.find(
     (x) =>
       x.preview.received[1] < u.hp &&
+      !badTrade(x) &&
       (x.score > 0 || x.e.hp <= x.preview.dealt[0]),
   );
   const shoot = (x) => ({
@@ -449,6 +756,8 @@ export function npcUnitOrder(view, id) {
     currentDanger < u.hp * 0.6
   )
     return shoot(shot);
+  const plunder = pillagePlan();
+  if (plunder) return plunder;
   if (
     (isCivilian(u) && currentDanger > 5) ||
     (u.isolation >= 2 && u.type !== "settler") ||
@@ -561,7 +870,13 @@ export function npcUnitOrder(view, id) {
       e.type === u.type &&
       ((e.size === 1 && u.size === 1) || (e.size === 2 && u.size === 2)) &&
       distance(e, u) <= 1 &&
-      (ratio < 0.7 || (targets.length && foes.some((x) => x.size > u.size))),
+      (ratio < 0.7 ||
+        (targets.length && foes.some((x) => x.size > u.size)) ||
+        // Quiet buildup: form brigades/divisions once the army is large enough.
+        (!targets.length &&
+          ratio >= 0.9 &&
+          e.hp / maxHealth(e) >= 0.9 &&
+          allies.filter(military).length >= S.MERGE_MIN_ARMY)),
   );
   if (mate) return { unitId: id, action: "merge", targetId: mate.id };
 
@@ -596,7 +911,11 @@ export function npcUnitOrder(view, id) {
 
   // Position to fire this turn, preserve a screen, and avoid suicidal melee charges.
   const options = view.tiles.filter(
-    (p) => reach.has(key(p)) && p.explored && !equal(p, u),
+    (p) =>
+      reach.has(key(p)) &&
+      p.explored &&
+      !equal(p, u) &&
+      !enemyCities.some((c) => c.hp > 0 && equal(c, p)),
   );
   const firing = [];
   for (const p of options) {
@@ -613,6 +932,7 @@ export function npcUnitOrder(view, id) {
         preview.received[1] -
         danger(p) * 0.5 +
         support(p) * 0.15 +
+        ground(p) * S.FIRING_GROUND_WEIGHT +
         (e.hp <= preview.dealt[0] ? 35 : 0) -
         (def.range > 1 ? Math.abs(distance(p, e) - def.range) * 3 : 0);
       if (score > 2) firing.push({ p, score });
@@ -620,6 +940,9 @@ export function npcUnitOrder(view, id) {
   }
   firing.sort((a, b) => b.score - a.score || stable(a.p, b.p));
   if (firing[0]) return moveTo(firing[0].p);
+  // Garrison and farmland defense come before advancing the line.
+  if (assigned?.hold) return fortify();
+  if (assigned?.order) return assigned.order;
 
   // Advance the line as a group rather than walking artillery onto an enemy.
   if (targets.length) {
@@ -627,11 +950,21 @@ export function npcUnitOrder(view, id) {
       (a, b) => distance(a, u) - distance(b, u) || stable(a, b),
     )[0];
     const preferred = u.type === "artillery" ? def.range : 1;
+    // Outgunned locally: hold favorable ground and make the enemy come to us.
+    const localFoe = foes
+      .filter((e) => distance(e, target) <= 3)
+      .reduce((n, e) => n + power(e), 0);
+    const localAlly = allies
+      .filter((e) => military(e) && distance(e, u) <= 3)
+      .reduce((n, e) => n + power(e), 0);
+    const outgunned = localFoe > localAlly * S.OUTGUNNED_RATIO;
     const rank = (p) =>
       -Math.abs(distance(p, target) - preferred) * 4 -
       danger(p) * 0.7 +
       support(p) * 0.2 +
-      (p.terrain === "hills" ? 1 : 0);
+      ground(p) * (outgunned ? S.OUTGUNNED_GROUND_WEIGHT : 0.5) -
+      (outgunned && distance(p, target) <= 1 ? S.OUTGUNNED_CONTACT_PENALTY : 0) -
+      (!strikeReady && seenByEnemy(p) ? S.HIDE_PENALTY : 0);
     const candidates = [t, ...options]
       .filter(
         (p) =>
@@ -650,6 +983,67 @@ export function npcUnitOrder(view, id) {
   }
   if (u.owner === "cs" && !cities.some((c) => equal(c, u) && c.queue))
     return fortify();
+  // Offensive march: at war with a known (seen or remembered) city and no
+  // local contact, bring the army to a staging ring just outside the city's
+  // vision.  The advance branch takes over on contact once the strike is ready.
+  const homeThreat = home
+    ? foes.some((e) => distance(e, home) <= S.THREAT_RANGE)
+    : false;
+  const objective =
+    military(u) && !["barb", "cs"].includes(u.owner) && !assigned && !homeThreat
+      ? [
+          ...enemyCities,
+          ...(view.cityContacts ?? []).filter((c) => atWarWith(c.owner)),
+        ]
+          .filter((c) => !c.camp)
+          .sort((a, b) => distance(a, u) - distance(b, u) || stable(a, b))[0]
+      : null;
+  if (objective && distance(u, objective) > S.STAGING_DISTANCE && u.movesLeft > 0) {
+    const step = view.tiles
+      .filter(
+        (p) =>
+          reach.has(key(p)) &&
+          p.explored &&
+          !blocked(p) &&
+          !lethal(p) &&
+          !equal(p, u) &&
+          distance(p, objective) >= S.STAGING_DISTANCE,
+      )
+      .sort(
+        (a, b) =>
+          distance(a, objective) - distance(b, objective) ||
+          danger(a) - danger(b) ||
+          ground(b) - ground(a) ||
+          stable(a, b),
+      )[0];
+    if (step && distance(step, objective) < distance(u, objective))
+      return moveTo(step);
+  }
+  // Pre-empt key ground between home and an approaching threat: hills, own
+  // structures and tiles covering own farmland.
+  const threat = home && u.owner !== "barb"
+    ? foes
+        .filter((e) => distance(e, home) <= S.THREAT_RANGE)
+        .sort((a, b) => distance(a, home) - distance(b, home) || stable(a, b))[0]
+    : null;
+  if (threat && u.type !== "artillery") {
+    const keyTile = (p) =>
+      (p.terrain === "hills" || ownStructure(p) || cover(p) > 0) &&
+      distance(p, home) <= S.KEY_TILE_RANGE &&
+      distance(p, threat) < distance(home, threat) &&
+      !isCityTile(p);
+    const rank = (p) =>
+      ground(p) + cover(p) * S.COVER_WEIGHT - danger(p) * 0.3 - distance(p, threat) * 0.5;
+    const spots = view.tiles
+      .filter((p) => keyTile(p) && p.explored && !lethal(p) && (equal(p, u) || (reach.has(key(p)) && !blocked(p))))
+      .sort((a, b) => rank(b) - rank(a) || stable(a, b));
+    if (spots[0]) {
+      if (equal(spots[0], u) || (keyTile(t) && rank(t) >= rank(spots[0]) - 1))
+        return fortify();
+      return moveTo(spots[0]);
+    }
+  }
+  const atWar = factionList(view).some((f) => f.id !== "barb" && f.hostile);
   const scouts = allies.filter((e) => e.type === "cavalry").sort(stable);
   const scout = u.owner === "barb" || scouts[0]?.id === id;
   const discovery = (p) =>
@@ -660,6 +1054,7 @@ export function npcUnitOrder(view, id) {
       ? Math.abs(distance(p, home) - (u.type === "artillery" ? 1 : 3)) * 0.8
       : 0) +
     (p.terrain === "hills" ? 1 : 0) -
+    (atWar && !scout && seenByEnemy(p) ? S.HIDE_PENALTY : 0) -
     (cities.some((c) => equal(c, p) && c.queue) ? 20 : 0);
   const explore = view.tiles
     .filter((p) => reach.has(key(p)) && !equal(p, u) && (p.explored || scout))
@@ -705,36 +1100,74 @@ export function npcDiplomacy(view) {
     (u) => u.owner === view.playerId && military(u),
   );
   const cities = (view.cities ?? []).filter((c) => c.owner === view.playerId);
-  if (army.length < 5 || army.reduce((n, u) => n + power(u), 0) < 110)
+  const S = NPC_STRATEGY;
+  if (
+    army.length < S.MIN_OFFENSIVE_ARMY ||
+    army.reduce((n, u) => n + power(u), 0) < S.MIN_OFFENSIVE_POWER
+  )
     return null;
-  const rivals = (view.units ?? []).filter(
-    (u) =>
-      u.owner !== view.playerId &&
-      u.owner !== "barb" &&
-      military(u) &&
+  // Not a warmonger: an offensive needs a clear advantage that is sustained
+  // through the public denouncement wait (or an existing territorial casus
+  // belli), plus a concrete opening: encroaching troops, a weak garrison or
+  // exposed farmland next to our border.  Peaceful play is the default.
+  const aggression =
+    S.TEMPERAMENT[view.playerId] ?? S.TEMPERAMENT.default;
+  const required =
+    S.OFFENSE_ADVANTAGE_BASE + (1 - aggression) * S.OFFENSE_ADVANTAGE_SCALE;
+  const ownPower = army.reduce((n, u) => n + power(u), 0);
+  const tiles = view.tiles ?? [];
+  const opportunity = (f) => {
+    if (!f || f.id === view.playerId || f.id === "barb") return null;
+    if (f.kind && f.kind !== "player") return null;
+    if (f.relation === "alliance" || f.peaceUntil >= view.turn || f.hostile)
+      return null;
+    const theirUnits = (view.units ?? []).filter(
+      (u) => u.owner === f.id && military(u),
+    );
+    const near = (view.cities ?? []).filter(
+      (c) =>
+        c.owner === f.id &&
+        !c.camp &&
+        cities.some((o) => distance(o, c) <= S.NEIGHBOUR_RANGE),
+    );
+    const encroaching = theirUnits.filter((u) =>
       cities.some((c) => distance(c, u) < 3),
-  );
-  for (const rival of rivals.sort(stable)) {
-    const f = factions.find((f) => f.id === rival.owner);
-    if (!f || f.relation === "alliance" || f.peaceUntil >= view.turn) continue;
-    const ours = army
-      .filter((u) => distance(u, rival) <= 5)
-      .reduce((n, u) => n + power(u), 0);
-    const theirs = view.units
-      .filter(
-        (u) =>
-          u.owner === rival.owner && military(u) && distance(u, rival) <= 5,
-      )
-      .reduce((n, u) => n + power(u), 0);
+    );
+    if (!near.length && !encroaching.length) return null;
+    const theirPower =
+      theirUnits.reduce((n, u) => n + power(u), 0) +
+      near.reduce((n, c) => n + (c.hp ?? 0) + (c.wallHp ?? 0), 0) *
+        S.CITY_DEFENSE_WEIGHT;
+    const exposed = tiles.filter(
+      (t) =>
+        t.owner === f.id &&
+        (t.farm || t.developed) &&
+        !t.ruin &&
+        cities.some((o) => distance(o, t) <= S.NEIGHBOUR_RANGE),
+    ).length;
+    const weakGarrison = near.some(
+      (c) => !theirUnits.some((u) => distance(u, c) <= 1),
+    );
+    if (ownPower < theirPower * required) return null;
+    if (!(encroaching.length || weakGarrison || exposed >= S.EXPOSED_IMPROVEMENTS_MIN))
+      return null;
     const risk = npcWarRisk(view, f.id);
     // Public guarantees add a coalition and commitment penalty.  This uses
     // only the same scoped units/cities already present in the NPC view; an
     // unseen backer's army is never read from the live game object.
-    if (ours < theirs * 1.35 || ours < risk.coalitionStrength * 1.1) continue;
-    return {
-      action: f.relation === "denounced" ? "declareWar" : "denounce",
-      factionId: f.id,
-    };
+    if (ownPower < risk.coalitionStrength * 1.1) return null;
+    return f;
+  };
+  for (const f of factions
+    .slice()
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
+    if (!opportunity(f)) continue;
+    if (f.warJustification?.justified)
+      return { action: "declareWar", factionId: f.id };
+    // Wait out the formal-war window after our own denouncement; never a
+    // surprise war.
+    if (f.relation === "denounced") return null;
+    return { action: "denounce", factionId: f.id };
   }
   return null;
 }

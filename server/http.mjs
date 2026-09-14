@@ -206,6 +206,8 @@ export function createApi({
       observation: observe(m.game, seatId, now()),
     });
   });
+  // Metadata only (id/name/turn/mode/savedAt); never serialized game state.
+  app.get("/api/saves", async (_req, res) => res.json(await saves.list()));
   app.post("/api/saves/load", async (req, res) => {
     if (matches.size >= 150)
       throw new GameError("열린 경기가 너무 많아요.", 429);

@@ -1,3 +1,4 @@
+import { productionType } from "../shared/rules.js";
 // UI-only production arithmetic. The server remains the authority for
 // affordability and completion; this helper only makes the displayed cost and
 // ETA use the same units (production points, not turns).
@@ -23,4 +24,13 @@ export function estimateCityProduction(city, type, definition) {
     progress: city?.queue === type ? city.production : 0,
     productionRate: city?.productionRate,
   });
+}
+
+// Guard against wiping a queue that already has progress with one click.
+export function confirmClearProduction(city, ask = (message) => (typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(message) : true)) {
+  if (!city?.queue || !((Number(city.production) || 0) > 0)) return true;
+  const definition = productionType(city.queue, city);
+  return ask(
+    `${definition?.name ?? city.queue} 생산이 ${Math.floor(city.production)}/${definition?.cost ?? "?"}까지 진행됐어요. 정말 취소할까요? 진행도와 예약 인구가 초기화돼요.`,
+  );
 }

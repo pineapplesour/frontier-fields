@@ -27,6 +27,71 @@ const human = (g, p) =>
   !g.players[p].npc &&
   !["cs", "barb"].includes(p);
 
+/**
+ * The single rule-based acceptance decision.  `handleDeal` uses it both for
+ * `deal-preview` and for the real proposal, so a preview can never disagree
+ * with what the NPC actually does.  `never` marks conditions the NPC cannot
+ * accept at any price (blocked peace, denounced alliance, invalid assets…);
+ * otherwise `demands` lists what would make it accept right now: the gold
+ * shortfall, plus an equivalent resource bundle the player could give instead.
+ */
+export function npcDealVerdict(g, player, p, additionalGold, validate) {
+  let blocked = null;
+  try {
+    validate(p, false);
+  } catch (error) {
+    blocked = error?.message ?? String(error);
+  }
+  if (blocked)
+    return {
+      wouldAccept: false,
+      never: true,
+      additionalGold: null,
+      demands: null,
+      reason: blocked,
+    };
+  if (additionalGold > 0) {
+    const resources = resourceAlternative(g, player, p.give, additionalGold);
+    const list = Object.entries(resources)
+      .map(([r, n]) => `${RESOURCES[r].name} ${n}`)
+      .join(", ");
+    return {
+      wouldAccept: false,
+      never: false,
+      additionalGold,
+      demands: { gold: additionalGold, resources },
+      reason:
+        `이걸 받으려면 상대는 골드 ${additionalGold} 추가를 원해요.` +
+        (list ? ` (또는 자원 ${list})` : ""),
+    };
+  }
+  return {
+    wouldAccept: true,
+    never: false,
+    additionalGold: 0,
+    demands: { gold: 0, resources: {} },
+    reason: "현재 조건을 수락할 의향이 있어요.",
+  };
+}
+// Greedy bundle from the player's own remaining stockpile whose market sell
+// value covers the shortfall; empty when the stockpile cannot cover it.
+function resourceAlternative(g, player, give, shortfall) {
+  const stock = g.stockpiles?.[player] ?? {};
+  const bundle = {};
+  let remaining = shortfall;
+  for (const r of Object.keys(MARKET).sort((a, b) => MARKET[b].sell - MARKET[a].sell)) {
+    if (remaining <= 0) break;
+    const available = (stock[r] ?? 0) - (give.resources?.[r] ?? 0);
+    if (available <= 0 || !MARKET[r].sell) continue;
+    const n = Math.min(available, Math.ceil(remaining / MARKET[r].sell));
+    if (n > 0) {
+      bundle[r] = n;
+      remaining -= n * MARKET[r].sell;
+    }
+  }
+  return remaining <= 0 ? bundle : {};
+}
+
 // `ensureLogisticsState` is intentionally called for every save so the
 // observation ledger is always serializable.  Presence of that ledger alone
 // must not silently opt a legacy match into physical food/resource settlement;
@@ -554,6 +619,10 @@ export function handleDeal(
         status: "empty",
         message: "양쪽 목록에서 거래할 항목을 골라 주세요.",
         additionalGold: null,
+        wouldAccept: false,
+        never: false,
+        demands: null,
+        reason: "빈 제안은 보낼 수 없어요.",
       };
     fail("제안에 거래 항목을 넣어 주세요.");
   }
@@ -626,62 +695,56 @@ export function handleDeal(
       return v + 150 + (c.population ?? 1) * 25 + (c.capital ? 150 : 0);
     }, 0) +
     (s.warAgainst ? 60 : 0) + (s.openBorders ? 30 : 0);
+  // Peace itself carries no price: a rule-based counterpart accepts a bare
+  // peace offer once the ten-turn minimum war duration has passed.  Only the
+  // concrete assets requested on top of it are valued.
   const additionalGold = Math.max(
     0,
     Math.ceil(
       value(p.receive) +
-        (p.alliance && relation(g, player, to) !== "good" ? 30 : 0) +
-        (p.peace ? 40 : 0) -
+        (p.alliance && relation(g, player, to) !== "good" ? 30 : 0) -
         value(p.give),
     ),
   );
+  const verdict = npcDealVerdict(g, player, p, additionalGold, validate);
   if (preview) {
     if (human(g, to))
       return {
         status: "human",
         message: "사람이 조종하는 상대예요. 직접 수락해야 성립해요.",
         additionalGold: null,
+        wouldAccept: null,
+        never: false,
+        demands: null,
+        reason: "사람 상대의 수락은 예측하지 않아요.",
       };
-    try {
-      validate(p, false);
-    } catch {
+    if (verdict.never)
       return {
         status: "unavailable",
         message:
           "상대가 현재 이 조건을 이행할 수 없어요. 요청 항목을 조정해 주세요.",
         additionalGold: null,
+        ...verdict,
       };
-    }
     return {
       status: additionalGold ? "insufficient" : "accept",
-      additionalGold,
       canAfford: g.gold[player] >= own.gold + additionalGold,
       message: additionalGold
         ? `골드 ${additionalGold}를 더 제시하면 수락해요.`
         : "현재 조건을 수락할 의향이 있어요.",
+      ...verdict,
     };
   }
-  if (!human(g, to)) {
-    if (additionalGold > 0) {
-      event(
-        g,
-        [player],
-        `${factions(g)[to].name}이 거래를 거절했어요. 참전·도시·유닛의 가치에 맞는 대가가 필요해요.`,
-      );
-      notifyTrade(g, p, "rejected");
-      return true;
-    }
-    try {
-      validate(p, false);
-    } catch {
-      event(
-        g,
-        [player],
-        `${factions(g)[to].name}이 현재 거래 조건을 수락하지 못했어요.`,
-      );
-      notifyTrade(g, p, "rejected");
-      return true;
-    }
+  if (!human(g, to) && !verdict.wouldAccept) {
+    event(
+      g,
+      [player],
+      verdict.never
+        ? `${factions(g)[to].name}이 현재 거래 조건을 수락하지 못했어요.`
+        : `${factions(g)[to].name}이 거래를 거절했어요. 참전·도시·유닛의 가치에 맞는 대가가 필요해요.`,
+    );
+    notifyTrade(g, p, "rejected");
+    return true;
   }
   escrowOutgoing(g, p);
   if (human(g, to)) {

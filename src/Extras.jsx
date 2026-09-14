@@ -103,7 +103,11 @@ export function Settings({
   children,
 }) {
   const [seconds, setSeconds] = useState(game.turnSeconds ?? 60);
+  const [maxTurns, setMaxTurns] = useState(game.maxTurns ?? null);
   const [saved, setSaved] = useState(false);
+  const isHost = game.playerId === "p1";
+  const limitEditable =
+    game.phase === "lobby" || game.paused || game.phase === "finished";
   const [audioStatus, setAudioStatus] = useState("");
   return (
     <Modal title="설정" onClose={onClose}>
@@ -147,14 +151,77 @@ export function Settings({
           다음 턴부터 경기 전체에 적용돼요. 진행 중인 초시계는 초기화하지
           않아요.{game.playerId !== "p1" ? " 시간 변경은 방장만 가능해요." : ""}
         </p>
+        <label htmlFor="max-turns-mode">
+          턴 제한{" "}
+          <strong>{maxTurns === null ? "무제한" : `${maxTurns}턴`}</strong>
+        </label>
+        <div className="time-presets">
+          <button
+            id="max-turns-mode"
+            className={maxTurns === null ? "active" : ""}
+            disabled={!isHost}
+            onClick={() => {
+              setMaxTurns(null);
+              setSaved(false);
+            }}
+          >
+            무제한
+          </button>
+          {[40, 80, 120, 200].map((n) => (
+            <button
+              className={n === maxTurns ? "active" : ""}
+              key={n}
+              disabled={!isHost}
+              onClick={() => {
+                setMaxTurns(n);
+                setSaved(false);
+              }}
+            >
+              {n}턴
+            </button>
+          ))}
+          <input
+            id="max-turns"
+            type="number"
+            min="10"
+            max="1000"
+            step="1"
+            placeholder="숫자"
+            value={maxTurns ?? ""}
+            disabled={!isHost}
+            onChange={(e) => {
+              const v = e.target.value === "" ? null : Number(e.target.value);
+              setMaxTurns(v === null || Number.isNaN(v) ? null : v);
+              setSaved(false);
+            }}
+            data-tip="비우면 무제한. 10~1000턴. 대기실이거나 일시정지 중일 때만 바꿀 수 있고, 턴 제한으로 끝난 경기는 제한을 올리거나 없애면 다시 이어져요."
+          />
+        </div>
+        <p className="description">
+          기본은 무제한이에요. 턴 제한에 도달하면 최종 점수로 승패를 정해요.
+          {isHost && !limitEditable
+            ? " 턴 제한 변경은 대기실이거나 일시정지 중일 때만 가능해요."
+            : ""}
+        </p>
         <button
           className="primary full"
-          disabled={busy || game.playerId !== "p1"}
+          disabled={busy || !isHost}
           onClick={async () => {
-            if (await onSave(seconds)) setSaved(true);
+            const limit =
+              maxTurns === null
+                ? null
+                : Math.min(1000, Math.max(10, Math.round(maxTurns)));
+            const changedLimit = limit !== (game.maxTurns ?? null);
+            if (
+              await onSave({
+                turnSeconds: seconds,
+                ...(changedLimit ? { maxTurns: limit } : {}),
+              })
+            )
+              setSaved(true);
           }}
         >
-          {saved ? "저장됨 · 다음 턴부터 적용" : "턴 시간 저장"}
+          {saved ? "저장됨 · 다음 턴부터 적용" : "턴 설정 저장"}
         </button>
       </div>
       <div className="settings-section">
@@ -639,7 +706,7 @@ export function Diplomacy({
   onTrade,
   onClose,
 }) {
-  const [offer, setOffer] = useState(40),
+  const [offer, setOffer] = useState(0),
     [war, setWar] = useState(null);
   return (
     <Modal title="외교" onClose={onClose}>

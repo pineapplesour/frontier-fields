@@ -2,7 +2,6 @@ import {
   WIDTH,
   HEIGHT,
   TURN_MS,
-  MAX_TURNS,
   TYPES,
   unitMovement,
   unitAttacks,
@@ -84,6 +83,13 @@ import {
   combatRollRange,
   hasLineOfSight,
   cityCounterDamage,
+  formationTier,
+  formationTierName,
+  preventMutualDeath,
+  unfavorableFight,
+  killXp,
+  COMBAT_XP_PARTICIPATION,
+  COMBAT_XP_KILL,
 } from "../shared/combat.js";
 import { randomUUID } from "node:crypto";
 import { constructionIssue } from "../shared/construction.js";
@@ -202,14 +208,7 @@ function normalizeFormation(u) {
   const current = u.formation;
   if (!current || typeof current !== "object" || Array.isArray(current)) {
     u.formation = {
-      tier:
-        u.size === 1
-          ? "base"
-          : u.size === 2
-            ? "brigade"
-            : u.size === 4
-              ? "corps"
-              : "legacy",
+      tier: formationTier(u.size),
       sourceIds: [u.id],
       sourceNames: u.name ? [u.name] : [],
       sourceXp: [u.xp],
@@ -233,20 +232,16 @@ function normalizeFormation(u) {
   );
   if (!current.sourceXp.length) current.sourceXp = [u.xp];
   current.manpower = u.size;
-  current.tier ??=
-    u.size === 1
-      ? "base"
-      : u.size === 2
-        ? "brigade"
-        : u.size === 4
-          ? "corps"
-          : "legacy";
+  // Older saves stored "base"/"corps"; the current tier names are
+  // battalion (1) / brigade (2) / division (4).
+  if (current.tier === "base" || current.tier === "corps" || current.tier == null)
+    current.tier = formationTier(u.size);
   return current;
 }
 function mergeFormation(receiver, donor, size) {
   const a = normalizeFormation(receiver), b = normalizeFormation(donor);
   return {
-    tier: size === 2 ? "brigade" : size === 4 ? "corps" : "legacy",
+    tier: formationTier(size),
     sourceIds: [...a.sourceIds, ...b.sourceIds],
     sourceNames: [...a.sourceNames, ...b.sourceNames],
     sourceXp: [...a.sourceXp, ...b.sourceXp],
@@ -986,6 +981,7 @@ export function createGame({
     reveals: {},
     deadline: future ? null : mode === "practice" ? now + TURN_MS : null,
     turnSeconds: TURN_MS / 1000,
+    maxTurns: null,
     revision: 1,
     winner: null,
     nextUnit: 1,
@@ -1059,6 +1055,7 @@ export function restoreGame(snapshot, now = Date.now()) {
   g.random = random(g.randomState, (state) => {
     g.randomState = state;
   });
+  g.maxTurns = Number.isInteger(g.maxTurns) ? g.maxTurns : null;
   normalizeUnitManpower(g);
   ensureEconomyState(g);
   g.factions ??= factionsFor([
@@ -1421,7 +1418,7 @@ export function observe(g, player, now = Date.now()) {
       : [g.activePlayer],
     lastNpcTurns: g.lastNpcTurns ?? null,
     turnStartedAt: g.turnStartedAt,
-    maxTurns: MAX_TURNS,
+    maxTurns: g.maxTurns ?? null,
     revision: g.revision,
     playerId: player,
     deadline: g.deadline,
@@ -1727,7 +1724,7 @@ function migrateSupplyMode(g, next, player) {
 export function setSettings(
   g,
   player,
-  { turnSeconds, paused, supplyMode, upgradeRules, balance, turnMode } = {},
+  { turnSeconds, maxTurns, paused, supplyMode, upgradeRules, balance, turnMode } = {},
   now = Date.now(),
 ) {
   if (player !== "p1")
@@ -1767,6 +1764,21 @@ export function setSettings(
     (!Number.isInteger(turnSeconds) || turnSeconds < 10 || turnSeconds > 300)
   )
     throw new GameError("턴 제한은 10~300초 사이의 정수로 입력해 주세요.");
+  if (
+    maxTurns !== undefined &&
+    maxTurns !== null &&
+    (!Number.isInteger(maxTurns) || maxTurns < 10 || maxTurns > 1000)
+  )
+    throw new GameError("턴 제한은 무제한(null) 또는 10~1000턴 사이의 정수로 입력해 주세요.");
+  const limitFinished = g.phase === "finished" && g.finishedBy === "turnLimit";
+  if (
+    maxTurns !== undefined &&
+    maxTurns !== (g.maxTurns ?? null) &&
+    !g.paused &&
+    g.phase !== "lobby" &&
+    !limitFinished
+  )
+    throw new GameError("턴 제한은 대기실이거나 일시정지 중일 때만 바꿀 수 있어요.", 409);
   if (
     paused !== undefined &&
     (typeof paused !== "boolean" || g.phase !== "planning")
@@ -1818,6 +1830,25 @@ export function setSettings(
     event(g, observerIds(g), "방장이 전투 밸런스 수치를 바꿨어요. 설정에서 현재 값을 확인할 수 있어요.");
   }
   if (turnSeconds !== undefined) g.turnSeconds = turnSeconds;
+  if (maxTurns !== undefined && maxTurns !== (g.maxTurns ?? null)) {
+    g.maxTurns = maxTurns;
+    const label = maxTurns === null ? "무제한" : `${maxTurns}턴`;
+    if (limitFinished && (maxTurns === null || g.turn <= maxTurns)) {
+      // The match ended only because the old limit ran out; the host has
+      // raised or removed it, so play resumes from the current turn.
+      g.phase = "planning";
+      g.winner = null;
+      g.finishedBy = null;
+      for (const seat of Object.values(g.players)) if (!seat.eliminated) seat.ready = false;
+      g.deadline = now + g.turnSeconds * 1000;
+      g.turnStartedAt = now;
+      event(
+        g,
+        observerIds(g),
+        `방장이 턴 제한을 ${label}으로 바꿔서 종료됐던 경기가 ${g.turn}턴부터 다시 이어져요. 이전 최종 점수 결과는 취소됐어요.`,
+      );
+    } else event(g, observerIds(g), `방장이 턴 제한을 ${label}으로 바꿨어요.`);
+  }
   if (paused !== undefined) {
     if (paused && !g.paused) {
       advanceDue(g, now);
@@ -1964,6 +1995,7 @@ export function restoreRuntimeGame(
   g.random = random(g.randomState, (state) => {
     g.randomState = state;
   });
+  g.maxTurns = Number.isInteger(g.maxTurns) ? g.maxTurns : null;
   normalizeUnitManpower(g);
   ensureEconomyState(g);
   g.factions ??= factionsFor([
@@ -2003,6 +2035,24 @@ export function restoreRuntimeGame(
     g.runtimeResumeRequired = true;
   }
   g.pausedAt ??= now;
+  // Diagnostic: a checkpoint written before the current turn began cannot
+  // contain anything done during that turn.  Tell the players so a restart
+  // loss is not mistaken for a game bug.
+  if (
+    Number.isFinite(g.turnStartedAt) &&
+    Number.isFinite(checkpointedAt) &&
+    checkpointedAt < g.turnStartedAt
+  ) {
+    g.events ??= {};
+    for (const id of observerIds(g)) g.events[id] ??= [];
+    event(
+      g,
+      observerIds(g),
+      "서버 재시작으로 마지막 체크포인트 이후의 변경이 사라졌을 수 있어요",
+      { kind: "restartLoss", checkpointedAt, turnStartedAt: g.turnStartedAt },
+    );
+    g.restartLossPossible = true;
+  }
   g.turnStartedAt = now;
   g.practicePassAt = null;
   return g;
@@ -2248,7 +2298,7 @@ export function submitOrders(
         )
       )
         throw new GameError(
-          "같은 크기의 인접 부대만 1+1 여단 또는 2+2 군단으로 합칠 수 있어요.",
+          "같은 편제의 인접 부대만 대대+대대→여단, 여단+여단→사단으로 합칠 수 있어요.",
         );
       order.targetId = target.id;
     }
@@ -2358,6 +2408,25 @@ export function submitOrders(
   for (const [c, type, target] of builds) {
     const changedTarget = Boolean(c.productionTarget) !== Boolean(target) || (target && !equal(c.productionTarget, target));
     if (c.queue !== type || changedTarget) {
+      // Diagnostic: a queued item is being dropped or replaced by an explicit
+      // orders request.  Make it visible in the city owner's events and on
+      // the server console so a vanished queue can be traced to its cause.
+      if (c.queue && !c.camp) {
+        const previous = productionType(c.queue, c);
+        const label = previous?.name ?? c.queue;
+        const progress = `${Math.floor(c.production ?? 0)}/${previous?.cost ?? "?"}`;
+        event(
+          g,
+          [c.owner],
+          type
+            ? `${c.name} 생산 변경 · ${label} (진행 ${progress}) → ${productionType(type, c)?.name ?? type}`
+            : `${c.name} 생산 취소 · ${label} (진행 ${progress}) 예약을 비웠어요.`,
+          { kind: "productionCleared", cityId: c.id, previousType: c.queue, nextType: type },
+        );
+        console.log(
+          `[orders] ${player} cleared production of ${c.id} (${c.queue} ${progress}) payload=${JSON.stringify(production)}`,
+        );
+      }
       releaseReservedManpower(c);
       c.production = 0;
     }
@@ -2508,7 +2577,7 @@ export function submitOrders(
       }
     d.hp -= loss;
     if (d.hp <= 0) markCarrierDestroyed(g, d.id);
-    d.xp += 2;
+    d.xp += COMBAT_XP_PARTICIPATION;
     event(
       g,
       [c.owner, d.owner],
@@ -2755,6 +2824,11 @@ function handleCombat(g, scope = living(g)) {
   const xp = new Map();
   const addXp = (unit, amount) =>
     xp.set(unit.id, (xp.get(unit.id) ?? 0) + amount);
+  // `${killer.id}|${victim.id}` → whether the fight was unfavorable for the
+  // killer, judged at resolution before any damage is applied.
+  const underdog = new Map();
+  // attacker.id → defender whose melee counter-attack hit it.
+  const counters = new Map();
   const addHit = (u, amount) => hits.set(u.id, (hits.get(u.id) ?? 0) + amount);
   const attacks = scope.filter(
     (u) =>
@@ -2848,7 +2922,7 @@ function handleCombat(g, scope = living(g)) {
         g.reveals[u.owner] ??= [];
         g.reveals[u.owner].push({ q: target.q, r: target.r, turn: g.turn });
       }
-      if (!d) addXp(u, 2);
+      if (!d) addXp(u, COMBAT_XP_PARTICIPATION);
     }
     if (d) {
       if (capturing && d === captureTarget) {
@@ -2878,7 +2952,7 @@ function handleCombat(g, scope = living(g)) {
         d.acted = true;
         d.fortified = false;
         d.fortifyPending = false;
-        addXp(u, 2);
+        addXp(u, COMBAT_XP_KILL);
         event(
           g,
           [oldOwner, u.owner],
@@ -2900,10 +2974,11 @@ function handleCombat(g, scope = living(g)) {
       }
       const n = damage(u, d, g);
       addHit(d, n);
-      addXp(u, 2);
-      addXp(d, 2);
+      addXp(u, COMBAT_XP_PARTICIPATION);
+      addXp(d, COMBAT_XP_PARTICIPATION);
       if (!credited.has(d.id)) credited.set(d.id, []);
       credited.get(d.id).push(u);
+      underdog.set(`${u.id}|${d.id}`, unfavorableFight(g, u, d, true));
       event(
         g,
         [d.owner],
@@ -2921,8 +2996,11 @@ function handleCombat(g, scope = living(g)) {
           [u.owner],
           `${label(target)}에 포격했어요. 시야 밖의 피해는 확인할 수 없어요.`,
         );
-      if (distance(u, d) === 1 && military(d) && !bombard)
+      if (distance(u, d) === 1 && military(d) && !bombard) {
         addHit(u, Math.max(4, Math.round(damage(d, u, g) * counterMultiplier(g))));
+        counters.set(u.id, d);
+        underdog.set(`${d.id}|${u.id}`, unfavorableFight(g, d, u, false));
+      }
     } else {
       const c = targetCity;
       if (c) {
@@ -2935,7 +3013,7 @@ function handleCombat(g, scope = living(g)) {
         cityHits.set(c.id, (cityHits.get(c.id) ?? 0) + n);
         if (!cityAttackers.has(c.id)) cityAttackers.set(c.id, []);
         cityAttackers.get(c.id).push(u);
-        addXp(u, 2);
+        addXp(u, COMBAT_XP_PARTICIPATION);
         event(g, [c.owner], `${c.name} 방어 시설에 피해 ${n}.`);
         // A standing city returns fire on an adjacent direct attacker with a
         // population-scaled strength. Artillery keeps its stand-off immunity.
@@ -2965,6 +3043,26 @@ function handleCombat(g, scope = living(g)) {
         );
     }
   }
+  // No mutual annihilation: when a melee exchange would kill both sides, the
+  // side with the higher remaining strength keeps MIN_SURVIVOR_HP.
+  for (const [attackerId, d] of counters) {
+    const u = g.units.find((x) => x.id === attackerId);
+    if (!u) continue;
+    const resolved = preventMutualDeath({
+      attackerHp: u.hp,
+      attackerLoss: hits.get(u.id) ?? 0,
+      defenderHp: d.hp,
+      defenderLoss: hits.get(d.id) ?? 0,
+    });
+    if (!resolved.survivor) continue;
+    hits.set(u.id, resolved.attackerLoss);
+    hits.set(d.id, resolved.defenderLoss);
+    const survivor = resolved.survivor === "attacker" ? u : d;
+    event(g, [survivor.owner], `${label(survivor)} ${TYPES[survivor.type].name} 부대가 전멸 직전에 버텨 체력 ${Math.max(survivor.hp - (hits.get(survivor.id) ?? 0), 1)}로 살아남았어요.`);
+  }
+  const dying = new Set(
+    g.units.filter((x) => hits.has(x.id) && x.hp > 0 && x.hp <= hits.get(x.id)).map((x) => x.id),
+  );
   for (const u of g.units) {
     const loss = hits.get(u.id) ?? 0;
     if (loss)
@@ -2983,7 +3081,11 @@ function handleCombat(g, scope = living(g)) {
     u.hp -= hits.get(u.id) ?? 0;
     if (u.hp <= 0) {
       markCarrierDestroyed(g, u.id);
-      for (const a of credited.get(u.id) ?? []) addXp(a, 4);
+      for (const a of credited.get(u.id) ?? [])
+        addXp(a, killXp(underdog.get(`${a.id}|${u.id}`) === true));
+      const counterKiller = counters.get(u.id);
+      if (counterKiller && dying.has(u.id) && !dying.has(counterKiller.id))
+        addXp(counterKiller, killXp(underdog.get(`${counterKiller.id}|${u.id}`) === true));
       event(g, [u.owner], `${TYPES[u.type].name} 부대를 잃었어요.`);
       event(
         g,
@@ -3184,7 +3286,7 @@ function handleActions(g, scope = living(g), endTurn = false) {
         event(
           g,
           [t.owner],
-          `${TYPES[t.type].name} ${t.size}개 부대를 합쳐 ${t.size === 2 ? "여단" : "군단"}이 됐어요. 체력과 경험치를 이어받아요.`,
+          `${TYPES[t.type].name} ${t.size === 2 ? "대대 2개" : "여단 2개"}를 합쳐 ${formationTierName(t.size)}이 됐어요. 체력과 경험치를 이어받아요.`,
         );
       }
     }
@@ -3842,7 +3944,7 @@ export function resolveTurn(g, now = Date.now()) {
     delete u.engageTarget;
   }
   checkVictory(g);
-  if (g.turn > MAX_TURNS && g.phase !== "finished") {
+  if (turnLimitReached(g)) {
     const score = (p) =>
       economy(g, p).population * 5 +
       g.tiles.filter((t) => t.owner === p && t.farm).length * 3 +
@@ -3854,6 +3956,7 @@ export function resolveTurn(g, now = Date.now()) {
       .sort((a, b) => b[1] - a[1]);
     g.winner = scores[0][1] === scores[1][1] ? "draw" : scores[0][0];
     g.phase = "finished";
+    g.finishedBy = "turnLimit";
     event(
       g,
       observerIds(g),
@@ -3951,7 +4054,7 @@ function resolveExpansionTurn(g, now) {
     delete u.engageTarget;
   }
   checkVictory(g);
-  if (g.turn > MAX_TURNS && g.phase !== "finished") {
+  if (turnLimitReached(g)) {
     const scores = order
       .map((p) => [
         p,
@@ -3964,6 +4067,7 @@ function resolveExpansionTurn(g, now) {
     if (g.cities.some((c) => c.capital && !c.camp)) {
       g.winner = scores[0][1] === scores[1]?.[1] ? "draw" : scores[0][0];
       g.phase = "finished";
+      g.finishedBy = "turnLimit";
       event(
         g,
         observerIds(g),
@@ -4014,7 +4118,7 @@ function resolveSimultaneousRound(g, now) {
     delete u.engageTarget;
   }
   checkVictory(g);
-  if (g.turn > MAX_TURNS && g.phase !== "finished") {
+  if (turnLimitReached(g)) {
     const scores = order
       .map((p) => [
         p,
@@ -4026,6 +4130,7 @@ function resolveSimultaneousRound(g, now) {
     if (g.cities.some((c) => c.capital && !c.camp)) {
       g.winner = scores[0][1] === scores[1]?.[1] ? "draw" : scores[0][0];
       g.phase = "finished";
+      g.finishedBy = "turnLimit";
       event(
         g,
         observerIds(g),
@@ -4038,6 +4143,14 @@ function resolveSimultaneousRound(g, now) {
   for (const seat of Object.values(g.players)) seat.ready = false;
   g.deadline = g.phase === "planning" ? now + g.turnSeconds * 1000 : null;
   g.turnStartedAt = now;
+}
+/** Turn limit is per-game; `null`/missing means unlimited (default). */
+function turnLimitReached(g) {
+  return (
+    g.phase !== "finished" &&
+    Number.isInteger(g.maxTurns) &&
+    g.turn > g.maxTurns
+  );
 }
 function checkVictory(g) {
   for (const id of Object.keys(g.players).filter(id => !["cs", "barb"].includes(id))) {
@@ -4060,6 +4173,7 @@ function checkVictory(g) {
   if (capitals.length && owners.size === 1) {
     g.winner = [...owners][0];
     g.phase = "finished";
+    g.finishedBy = "capital";
   }
   if (g.phase === "finished") g.deadline = null;
 }
@@ -4585,7 +4699,7 @@ export function transact(g, player, raw, now = Date.now()) {
     beginEffects(g);
   } else if (action === "peace") {
     const target = raw.factionId,
-      gold = raw.gold ?? 40;
+      gold = raw.gold ?? 0;
     if (
       !Object.hasOwn(factionMap(g), target) ||
       target === player ||
@@ -4600,8 +4714,8 @@ export function transact(g, player, raw, now = Date.now()) {
     if (g.proposals.some((p) => pair(p.from, p.to) === pair(player, target)))
       throw new GameError("진행 중인 평화 제안이 있어요.");
     if (!directSeatIds(g.players).includes(target)) {
-      if (gold < 40)
-        throw new GameError("이 세력은 평화 대가로 최소 40골드를 요구해요.");
+      // Peace has no minimum price; only the ten-turn war-duration gate
+      // (peaceIssue above) restricts it.
       g.gold[player] -= gold;
       g.gold[target] += gold;
       endWar(g, player, target);
@@ -4710,6 +4824,10 @@ export function previewDeal(g, player, raw, now = Date.now()) {
       status: "unavailable",
       message: error.message,
       additionalGold: null,
+      wouldAccept: false,
+      never: true,
+      demands: null,
+      reason: error.message,
     };
   }
 }

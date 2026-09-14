@@ -1,6 +1,8 @@
 export const WIDTH = 20;
 export const HEIGHT = 20;
 export const TURN_MS = 60_000;
+// Legacy default turn limit.  Matches are unlimited by default now; the
+// host sets a per-game `maxTurns` (null = unlimited) in settings.
 export const MAX_TURNS = 40;
 export const BOMBARD_RANGE = 2;
 export const RESOURCE_PER_POP = 5;
@@ -369,7 +371,7 @@ export const growthHalfTarget = (population) => growthTarget(population) / 2;
 export const landPrice = (tile, city) =>
   25 + distance(tile, city) * 10 + tile.fertility * 5;
 export const formationName = (size) =>
-  ({ 1: "단일 부대", 2: "여단 · 2개 합병", 4: "군단 · 4개 합병" })[size] ??
+  ({ 1: "대대", 2: "여단 · 대대 2개 합병", 4: "사단 · 여단 2개 합병" })[size] ??
   `기존 편성 · ${size}개 병력`;
 export const edgeKey = (a, b) => [key(a), key(b)].sort().join("|");
 // Directional permission: the territory owner grants the visitor entry.

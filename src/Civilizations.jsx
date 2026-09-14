@@ -304,7 +304,7 @@ export function Civilization({
     game.factions.find((f) => f.id === factionId) ??
     game.factions.find((f) => f.id !== game.playerId);
   const [confirm, setConfirm] = useState(null),
-    [gold, setGold] = useState(40),
+    [gold, setGold] = useState(0),
     [deadlineTurns, setDeadlineTurns] = useState(3),
     [resource, setResource] = useState("iron"),
     [amount, setAmount] = useState(1),

@@ -5,8 +5,8 @@ const isInternal = (unit) =>
 
 /**
  * Return the only formation tier the server can merge into.  Formations are
- * deliberately equal-tier: two base units make a brigade and two brigades
- * make a corps.  Legacy size-three formations remain displayable but cannot
+ * deliberately equal-tier: two battalions make a brigade and two brigades
+ * make a division.  Legacy size-three formations remain displayable but cannot
  * be silently folded into a new tier.
  */
 export function mergedFormationSize(source, target) {

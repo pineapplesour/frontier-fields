@@ -26,11 +26,14 @@ test("ranged combat keeps its real distance instead of inventing a melee counter
     assert.deepEqual(p.received,[0,0]);assert.equal(p.approachFrom,undefined);
   }
 });
-test("half health lowers attack by 20 percent and names the injury penalty in preview",()=>{
+test("attack scales linearly with remaining HP (half health → −50%, 10% → −90%) and preview names the injury penalty",()=>{
   const g=field(),a=addUnit(g,"p1","cavalry",{q:5,r:5}),b=addUnit(g,"p2","spearman",{q:6,r:5});
   const full=combatStrength(a,false,g,b);a.hp=50;
-  assert.equal(combatStrength(a,false,g,b),full*0.8);
-  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격력 −20%")));
+  assert.equal(combatStrength(a,false,g,b),full*0.5);
+  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격력 −50%")));
+  a.hp=10;
+  assert.ok(Math.abs(combatStrength(a,false,g,b)-full*0.1)<1e-9);
+  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격력 −90%")));
 });
 test("founding a city on hills consumes the settler without flattening the tile",()=>{
   const g=field(),s=addUnit(g,"p1","settler",{q:5,r:5});

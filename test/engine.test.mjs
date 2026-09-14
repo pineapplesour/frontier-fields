@@ -16,6 +16,7 @@ import {
   matchup,
   setSettings,
   transact,
+  restoreGame,
 } from "../server/engine.mjs";
 import {
   TYPES,
@@ -280,7 +281,7 @@ test("population grows from surplus and raises production and capacity", () => {
   assert.equal(e.production, 8, "Population growth and citizen production both contribute");
   assert.equal(e.capacity, 10);
 });
-test("equal brigades merge into a four-unit corps conserving damaged health and weighted experience in either order", () => {
+test("equal brigades merge into a four-unit division conserving damaged health and weighted experience in either order", () => {
   for (const reverse of [false, true]) {
     const g = field(),
       a = addUnit(g, "p1", "spearman", { q: 3, r: 2 }, { hp: 65, size: 2, xp: 8 }),
@@ -317,17 +318,19 @@ test("fortification consumes a stationary turn and moving cancels it", () => {
 });
 test("attacking and defending both earn XP; kills and level thresholds apply", () => {
   const g = field(),
-    a = addUnit(g, "p1", "musketeer", { q: 3, r: 2 }, { xp: 6 }),
+    a = addUnit(g, "p1", "musketeer", { q: 3, r: 2 }, { xp: 7 }),
     b = addUnit(g, "p2", "spearman", { q: 4, r: 2 });
   command(g, a, "attack", { target: { q: 4, r: 2 } });
   resolveTurn(g);
+  // +1 participation for both sides per combat.
   assert.equal(a.xp, 8);
-  assert.equal(b.xp, 2);
+  assert.equal(b.xp, 1);
   assert.equal(level(a.xp), 2);
   b.hp = 1;
   command(g, a, "attack", { target: { q: 4, r: 2 } });
   resolveTurn(g);
-  assert.equal(a.xp, 14);
+  // +1 participation +3 for destroying an enemy in an even fight.
+  assert.equal(a.xp, 12);
   assert.ok(!g.units.includes(b));
 });
 test("immediate lethal attack removes target before it can act", () => {
@@ -343,9 +346,9 @@ test("counter relationships and hill defense match the stated rules", () => {
   const g = field(),
     s = addUnit(g, "p1", "spearman", { q: 3, r: 2 }),
     c = addUnit(g, "p2", "cavalry", { q: 4, r: 2 });
-  assert.equal(matchup(s, c), 1.7);
-  assert.equal(matchup(c, { ...s, type: "musketeer" }), 1.5);
-  assert.equal(matchup(s, { ...c, type: "artillery" }), 1.6);
+  assert.equal(matchup(s, c), 2);
+  assert.equal(matchup(c, { ...s, type: "musketeer" }), 2);
+  assert.equal(matchup(s, { ...c, type: "artillery" }), 2);
   const before = strength(s, true, g);
   tile(g, s).terrain = "hills";
   assert.equal(strength(s, true, g), before * 1.2);
@@ -408,7 +411,7 @@ test("range-two artillery exposes firing position but not unseen retreat", () =>
   assert.ok(!JSON.stringify(view.events).includes(a.id));
   assert.ok(observe(g, "p1").events.some((e) => e.text.includes("머스킷병")));
   assert.equal(a.q, 2);
-  assert.equal(b.xp, 2);
+  assert.equal(b.xp, 1);
 });
 test("turn cutoff, out-of-turn requests and sequential early handoff are enforced", () => {
   const g = createGame({ mode: "duel" });
@@ -457,8 +460,64 @@ test("capturing the last opposing capital completes a four-civilization match", 
 });
 test("match has a bounded complete ending after maximum turns", () => {
   const g = createGame();
+  g.maxTurns = MAX_TURNS;
   g.turn = MAX_TURNS;
   resolveTurn(g);
   assert.equal(g.phase, "finished");
+  assert.equal(g.finishedBy, "turnLimit");
   assert.ok(["p1", "p2", "p3", "p4", "draw"].includes(g.winner));
+});
+test("matches are unlimited by default and pass the legacy 40-turn mark", () => {
+  const g = createGame();
+  assert.equal(g.maxTurns, null);
+  assert.equal(observe(g, "p1").maxTurns, null);
+  g.turn = MAX_TURNS;
+  for (let i = 0; i < 3; i++) resolveTurn(g);
+  assert.notEqual(g.phase, "finished");
+  assert.equal(g.winner, null);
+  assert.ok(g.turn > MAX_TURNS);
+});
+test("host can set, validate, and remove the turn limit; a limit-finished match reopens", () => {
+  const g = createGame();
+  assert.throws(() => setSettings(g, "p2", { maxTurns: 50 }), /방장/);
+  assert.throws(() => setSettings(g, "p1", { maxTurns: 5 }), /10~1000/);
+  assert.throws(() => setSettings(g, "p1", { maxTurns: 2000 }), /10~1000/);
+  assert.throws(() => setSettings(g, "p1", { maxTurns: 40.5 }), /10~1000/);
+  setSettings(g, "p1", { paused: true });
+  const obs = setSettings(g, "p1", { maxTurns: 40, paused: false });
+  assert.equal(obs.maxTurns, 40);
+  assert.equal(g.maxTurns, 40);
+  g.turn = 40;
+  resolveTurn(g);
+  assert.equal(g.phase, "finished");
+  assert.equal(g.finishedBy, "turnLimit");
+  const before = g.events.p1.length;
+  const reopened = setSettings(g, "p1", { maxTurns: null });
+  assert.equal(reopened.phase, "planning");
+  assert.equal(reopened.winner, null);
+  assert.equal(reopened.maxTurns, null);
+  assert.equal(g.finishedBy, null);
+  assert.ok(g.deadline > 0);
+  assert.ok(g.events.p1.slice(before).some((e) => /다시 이어져요/.test(e.text ?? String(e))));
+  assert.equal(g.turn, 41);
+  resolveTurn(g);
+  assert.notEqual(g.phase, "finished");
+});
+test("a match won by capital capture cannot be reopened through the turn limit", () => {
+  const g = createGame();
+  g.phase = "finished";
+  g.winner = "p1";
+  g.finishedBy = "capital";
+  assert.throws(() => setSettings(g, "p1", { maxTurns: 40 }), /대기실|일시정지/);
+  g.maxTurns = 40;
+  assert.throws(() => setSettings(g, "p1", { maxTurns: null }), /대기실|일시정지/);
+  assert.equal(g.phase, "finished");
+  assert.equal(g.winner, "p1");
+});
+test("restored saves without maxTurns are unlimited", () => {
+  const g = createGame();
+  const snap = structuredClone({ ...g, random: undefined });
+  delete snap.maxTurns;
+  const r = restoreGame(snap);
+  assert.equal(r.maxTurns, null);
 });

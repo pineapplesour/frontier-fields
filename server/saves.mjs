@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { GameError, restoreGame } from "./engine.mjs";
@@ -30,6 +30,23 @@ export function saveStore(directory) {
         { flag: "wx", mode: 0o600 },
       );
       return metadata;
+    },
+    async list() {
+      if (!directory) return [];
+      let files = [];
+      try { files = await readdir(directory); } catch { return []; }
+      const out = [];
+      for (const f of files) {
+        if (!/^[a-f0-9]{48}\.json$/.test(f)) continue;
+        try {
+          const data = JSON.parse(await readFile(path.join(directory, f), "utf8"));
+          if (data.version === 1 && data.metadata?.id) {
+            const { id, name, turn, mode, savedAt } = data.metadata;
+            out.push({ id, name, turn, mode, savedAt });
+          }
+        } catch {}
+      }
+      return out.sort((a, b) => b.savedAt - a.savedAt);
     },
     async load(id, now) {
       if (!directory || !/^[a-f0-9]{48}$/.test(id ?? ""))

@@ -472,7 +472,7 @@ test("formations merge only equal tiers with literal summed health and retained 
   assert.equal(c.size, 4);
   assert.equal(c.hp, 314);
   assert.equal(maxHealth(c), 400);
-  assert.equal(c.formation.tier, "corps");
+  assert.equal(c.formation.tier, "division");
   assert.equal(c.formation.manpower, 4);
 
   const legacy = addUnit(g, "p1", "cavalry", { q: 7, r: 3 }, { size: 3, hp: 201, xp: 12 });
@@ -655,7 +655,9 @@ test("direct military overrun captures builders, while final city capture preser
 
 test("preview exposes position modifiers and mathematically bounded lethal/death risk, and joint-war deal commits both sides atomically", () => {
   const g = field();
-  const attacker = addUnit(g, "p1", "spearman", { q: 3, r: 3 }, { hp: 10 });
+  // Attack strength is linear in HP, so a 1-HP defender's counter is the
+  // 6-damage floor; a 6-HP attacker keeps the death risk "possible".
+  const attacker = addUnit(g, "p1", "spearman", { q: 3, r: 3 }, { hp: 6 });
   const target = addUnit(g, "p2", "spearman", { q: 4, r: 3 }, { hp: 1 });
   g.tiles.find((t) => equal(t, attacker)).terrain = "hills";
   const preview = combatPreview(observe(g, "p1"), attacker, {

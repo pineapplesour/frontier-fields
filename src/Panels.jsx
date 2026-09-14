@@ -19,13 +19,13 @@ import {
   settlementIssue,
   farmTerrainYield,
 } from "../shared/rules.js";
-import { combatStrength } from "../shared/combat.js";
+import { combatStrength, formationTierName } from "../shared/combat.js";
 import { fortIssue } from "../shared/structures.js";
 import { constructionIssue } from "../shared/construction.js";
 import { Icon, UnitIcon } from "./Icons.jsx";
 import { FeedbackContext } from "./feedback.js";
 import { factionFor } from "./factions.js";
-import { estimateCityProduction } from "./productionHelpers.js";
+import { estimateCityProduction, confirmClearProduction } from "./productionHelpers.js";
 import { cityFoodSummary, detailedLogisticsState } from "./logisticsHelpers.js";
 import {
   LogisticsProductionOptions,
@@ -234,7 +234,7 @@ export function Selection({
           <h2>
             {unit ? def.name : city ? city.name : TERRAINS[tile.terrain].name}
             {unit && unit.size > 1 ? (
-              <span className="formation-count">×{unit.size}</span>
+              <span className="formation-count">{formationTierName(unit.size)} ×{unit.size}</span>
             ) : null}
           </h2>
           <p>
@@ -870,11 +870,11 @@ export function UnitDetails({
               onClick={onMerge}
             >
               <Icon name="merge" />
-              인접한 같은 크기의 같은 병종과 합병
+              인접한 같은 편제의 같은 병종과 합병 ({unit.size === 1 ? "대대+대대→여단" : "여단+여단→사단"})
             </button>
           ) : unit.size === 3 ? (
             <p className="builder-action-note" role="note">
-              기존 3개 편성은 유지돼요. 새 합병은 1+1=2, 2+2=4만 가능해요.
+              기존 3개 편성은 유지돼요. 새 합병은 대대+대대→여단, 여단+여단→사단만 가능해요.
             </p>
           ) : null}
           {unit.type === "artillery" ? (
@@ -1140,7 +1140,10 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
         <button
           className="text-button"
           disabled={disabled}
-          onClick={() => onChoose(null)}
+          onClick={() => {
+            if (!confirmClearProduction(city)) return;
+            onChoose(null);
+          }}
         >
           <Icon name="wheat" size={16} /> 생산 안 함 · 식량 생산 +25%
         </button>
@@ -1234,11 +1237,22 @@ export function Rules() {
       </p>
       <h3>병종과 합병</h3>
       <p>
-        창병은 자원 없이 생산하며 기병에게 공격력 ×1.7. 기병은 말 2가 필요하고
-        머스킷병에게 ×1.5. 머스킷병은 초석 2, 포병은 철 2·초석 2가 필요해요.
-        포병은 근접 직접 공격을 받을 때 피해 ×1.6. 인접한 같은 병종은 같은 크기끼리
-        1+1 여단(2) 또는 2+2 군단(4)으로만 합쳐요. 기존 3개 편성은 그대로
+        창병은 자원 없이 생산하며 기병에게 피해 ×2. 기병은 말 2가 필요하고
+        머스킷병에게 ×2. 머스킷병은 초석 2, 포병은 철 2·초석 2가 필요해요.
+        포병은 근접 직접 공격을 받을 때 피해 ×2. 반대로 자신을 상대하는 병종을
+        공격하면(역상성) 피해 ×0.75예요. 한 유닛은 대대예요. 인접한 같은
+        병종은 같은 편제끼리만 합쳐요: 대대+대대→여단, 여단+여단→사단. 대대는
+        여단에 합칠 수 없고 사단은 더 합칠 수 없어요. 기존 3개 편성은 그대로
         유지되며, 합병 후 체력을 합산하고 경험치는 편성 수로 가중 평균해요.
+      </p>
+      <h3>전투 결과와 경험치</h3>
+      <p>
+        전투에서 두 부대가 모두 전멸하는 일은 없어요. 서로 치명타를 주고받으면
+        남은 전력이 더 높은 쪽(동률이면 공격자)이 체력 1로 살아남아요. 전투에
+        참여한 부대는 매 전투마다 경험치 +1, 적 부대를 격파하면 +3, 상대 전력이
+        1.5배 이상이거나 역상성이거나 상대 편제가 더 클 때 격파하면 +5를 얻어요.
+        공격력과 방어력은 남은 체력에 정비례해요: 체력 50%면 −50%, 체력 10%면
+        −90%이고 하한은 없어요.
       </p>
       <h3>이동과 지형</h3>
       <p>

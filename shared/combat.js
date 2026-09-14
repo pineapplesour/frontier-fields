@@ -36,6 +36,92 @@ export const VETERAN_LUCK_CAP = 0.06;
 export const VETERAN_ATTACK_PER_LEVEL = 0.1;
 export const COUNTER_MATCHUP_VETERAN_PER_LEVEL = 0.03;
 
+// ---------------------------------------------------------------------------
+// Combat outcome rules (2026-09-15 user request).
+//
+// 1. No mutual annihilation: a unit-vs-unit exchange never leaves both sides
+//    at 0 HP. The side with the higher remaining strength before clamping
+//    (hp − damage taken, i.e. the side that was overkilled less) survives
+//    with MIN_SURVIVOR_HP. A tie goes to the attacker in melee. Ranged attacks
+//    (bombard, musket range 2) receive no return fire in this engine, so the
+//    tie rule only ever applies to a melee exchange.
+// 2. Experience: +1 for every unit taking part in a combat, +3 for
+//    destroying an enemy unit, +5 instead when the fight was clearly
+//    unfavorable for the destroyer.
+// 3. "Unfavorable" means at least one of: the enemy's effective strength at
+//    resolution was ≥ UNDERDOG_STRENGTH_RATIO × ours, the enemy had a
+//    counter-type advantage against us, or the enemy formation was larger.
+// ---------------------------------------------------------------------------
+export const MIN_SURVIVOR_HP = 1;
+
+// Counter-type (상성) balance. An attacker with the type advantage deals
+// COUNTER_ADVANTAGE_MULTIPLIER × normal damage; an attacker striking into a
+// type that counters it deals COUNTER_DISADVANTAGE_MULTIPLIER × normal damage.
+// The host balance setting `counterMultiplier` still scales melee return fire
+// on top of these. Veteran matchup mastery (up to +12%) stacks on the
+// advantage only.
+export const COUNTER_ADVANTAGE_MULTIPLIER = 2;
+export const COUNTER_DISADVANTAGE_MULTIPLIER = 0.75;
+
+// Attack and defense strength scale linearly with remaining HP and no floor:
+// 50% HP → −50%, 10% HP → −90%. `woundedPenalty` (experiment stat) is the
+// penalty at 0 HP in percent; the default of 100 gives factor = hp / maxHp.
+export const WOUNDED_PENALTY_MAX = 100;
+export const woundedFactor = (u) =>
+  1 - (unitStat(u, "woundedPenalty", WOUNDED_PENALTY_MAX) / 100) *
+    (1 - Math.max(0, Math.min(1, (u?.hp ?? 0) / maxHealth(u))));
+export const COMBAT_XP_PARTICIPATION = 1;
+export const COMBAT_XP_KILL = 3;
+export const COMBAT_XP_UNDERDOG_KILL = 5;
+export const UNDERDOG_STRENGTH_RATIO = 1.5;
+
+/** Formation tiers: 1 unit = 대대, 2 = 여단, 4 = 사단. Size 3 is a legacy formation. */
+export const FORMATION_TIERS = { 1: "battalion", 2: "brigade", 4: "division" };
+export const FORMATION_TIER_NAMES = {
+  battalion: "대대",
+  brigade: "여단",
+  division: "사단",
+  legacy: "기존 편성",
+};
+export const formationTier = (size) => FORMATION_TIERS[size] ?? "legacy";
+export const formationTierName = (size) => FORMATION_TIER_NAMES[formationTier(size)];
+
+/**
+ * Resolve a would-be mutual death. `attackerLoss`/`defenderLoss` are the raw
+ * damages already computed for the exchange. Returns the clamped losses; the
+ * survivor keeps at least MIN_SURVIVOR_HP.
+ */
+export function preventMutualDeath({ attackerHp, attackerLoss, defenderHp, defenderLoss }) {
+  if (attackerLoss < attackerHp || defenderLoss < defenderHp)
+    return { attackerLoss, defenderLoss, survivor: null };
+  const attackerRemaining = attackerHp - attackerLoss;
+  const defenderRemaining = defenderHp - defenderLoss;
+  // Higher remaining strength survives; a tie favours the attacker.
+  const survivor = attackerRemaining >= defenderRemaining ? "attacker" : "defender";
+  return survivor === "attacker"
+    ? { attackerLoss: Math.max(0, attackerHp - MIN_SURVIVOR_HP), defenderLoss, survivor }
+    : { attackerLoss, defenderLoss: Math.max(0, defenderHp - MIN_SURVIVOR_HP), survivor };
+}
+
+/**
+ * Whether destroying `enemy` counts as an underdog kill for `us`, judged from
+ * the state at resolution (before damage is applied). `usAttacking` selects
+ * which side uses attack vs. defense strength.
+ */
+export function unfavorableFight(view, us, enemy, usAttacking = true) {
+  if (!us || !enemy) return false;
+  const ours = combatStrength(us, !usAttacking, view, enemy);
+  const theirs = combatStrength(enemy, usAttacking, view, us);
+  return (
+    theirs >= ours * UNDERDOG_STRENGTH_RATIO ||
+    combatMatchup(enemy, us) > 1 ||
+    (Number(enemy.size) || 1) > (Number(us.size) || 1)
+  );
+}
+
+export const killXp = (unfavorable) =>
+  unfavorable ? COMBAT_XP_UNDERDOG_KILL : COMBAT_XP_KILL;
+
 // Experience shifts the same seeded distribution slightly upward. It is a
 // small luck edge, while the level multiplier in combatStrength remains the
 // main source of veteran advantage; this cannot turn a bad matchup into a
@@ -111,7 +197,7 @@ export function combatStrength(u, defending, view = {}, target = null) {
     u.size *
     (defending ? 1 : veteranAttackMultiplier(u)) *
     (1 + bonus) *
-    (1 - unitStat(u, "woundedPenalty", 40) / 100 * (1 - u.hp / maxHealth(u))) *
+    woundedFactor(u) *
     (1 - (u.isolation ? unitStat(u, "isolationPenalty", siegePenalty(u.isolation) * 100) / 100 : 0)) *
     (u.riverTurns > 0 ? 1 - unitStat(u, "riverPenalty", 20) / 100 : 1) *
     (defending ? 1 - jointAttackPenalty(view, u, target).penalty : 1)
@@ -177,11 +263,17 @@ export function hasLineOfSight(view, a, b) {
 
 export function combatMatchup(a, b) {
   if (!a || !b) return 1;
-  if (a.type === "cavalry" && b.type === "musketeer") return 1.5;
-  if (a.type === "spearman" && b.type === "cavalry") return 1.7;
+  if (a.type === "cavalry" && b.type === "musketeer") return COUNTER_ADVANTAGE_MULTIPLIER;
+  if (a.type === "spearman" && b.type === "cavalry") return COUNTER_ADVANTAGE_MULTIPLIER;
   if (b.type === "artillery" && distance(a, b) === 1 && a.type !== "artillery")
-    return 1.6;
+    return COUNTER_ADVANTAGE_MULTIPLIER;
   return 1;
+}
+
+/** Damage scale for an attacker striking into the type that counters it (역상성). */
+export function matchupDisadvantage(a, b) {
+  if (!a || !b) return 1;
+  return combatMatchup(b, a) > 1 ? COUNTER_DISADVANTAGE_MULTIPLIER : 1;
 }
 
 export function effectiveCombatMatchup(a, b) {
@@ -253,6 +345,7 @@ export function unitDamage(a, b, view, roll = 1) {
       ((27 * combatStrength(a, false, view, b)) /
         Math.max(8, combatStrength(b, true, view, a))) *
         effectiveCombatMatchup(a, b) *
+        matchupDisadvantage(a, b) *
         (a.type !== "artillery" && riverBetween(view, a, b) ? 1 - unitStat(a, "crossingPenalty", 25) / 100 : 1) *
         roll,
     ),
@@ -465,7 +558,7 @@ export function combatPreview(view, a, b) {
     reasons.push(
       `공격자 보급 단절 −${unitStat(a, "isolationPenalty", Math.round(siegePenalty(a.isolation) * 100))}%`,
     );
-  const injury = Math.max(0, Math.min(1, 1 - a.hp / maxHealth(a))) * unitStat(a, "woundedPenalty", 40);
+  const injury = Math.round((1 - woundedFactor(a)) * 1000) / 10;
   if (injury > 0) reasons.push(`부상 · 체력 ${Math.round(a.hp / maxHealth(a) * 100)}% · 공격력 −${Math.round(injury * 10) / 10}%`);
   const position = attackPositionBonus(a, b, view);
   reasons.push(...position.reasons);
@@ -490,6 +583,10 @@ export function combatPreview(view, a, b) {
     );
   if (!city && effectiveCombatMatchup(a, b) > combatMatchup(a, b))
     reasons.push("베테랑 상성 숙련 보정");
+  if (!city && matchupDisadvantage(a, b) < 1)
+    reasons.push(
+      `역상성 피해 −${Math.round((1 - matchupDisadvantage(a, b)) * 100)}%`,
+    );
   if (city && b.wallLevel && cityWallHp(b) > 0)
     reasons.push(`성벽 ${b.wallLevel}레벨 방어`);
   if (city && b.wallLevel && cityWallHp(b) <= 0)

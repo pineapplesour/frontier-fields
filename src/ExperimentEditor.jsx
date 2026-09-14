@@ -8,7 +8,7 @@ const fields = {
   isolationPenalty: ["보급 단절 시 페널티 %", 0, 90],
   riverPenalty: ["도하 후 페널티 %", 0, 90],
   crossingPenalty: ["강 건너 공격 페널티 %", 0, 90],
-  woundedPenalty: ["체력 손실 페널티 최대 %", 0, 90],
+  woundedPenalty: ["체력 손실 페널티 최대 %", 0, 100],
   jointPenalty: ["합동공격 추가 방향당 페널티 %", 0, 90],
 };
 

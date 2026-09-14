@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Modal } from "./Panels.jsx";
 const storageKey = "fieldline-saves-v1";
 function readSaves() {
@@ -9,7 +9,26 @@ function readSaves() {
     return [];
   }
 }
+function mergeSaves(local, server) {
+  const seen = new Set();
+  return [...server, ...local]
+    .filter((s) => s?.id && !seen.has(s.id) && seen.add(s.id))
+    .sort((a, b) => (b.savedAt ?? 0) - (a.savedAt ?? 0));
+}
 export function SaveGames({ game, busy, onSave, onLoad, onClose }) {
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/saves")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => {
+        if (alive && Array.isArray(list) && list.length)
+          setSaves((prev) => mergeSaves(prev, list));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
   const [name, setName] = useState(
     `${game.turn}턴 · ${game.mode === "duel" ? "대전" : "연습"}`,
   );

@@ -13,6 +13,7 @@ import {
   productionType,
   cityMaxHealth,
 } from "../shared/rules.js";
+import { formationTierName } from "../shared/combat.js";
 import {
   Settings,
   Market,
@@ -32,6 +33,7 @@ import { playSound, unlockSound } from "./sound.js";
 import { useGame } from "./useGame.js";
 import { resourceFlow } from "./resourceFlow.js";
 import { Board } from "./Board3D.jsx";
+import { CombatForecast } from "./CombatForecast.jsx";
 import { Icon, UnitIcon } from "./Icons.jsx";
 import {
   Modal,
@@ -134,7 +136,8 @@ function Clock({ game, onSettings }) {
                 ? "정산 대기"
                 : "상대 턴"}
         </em>{" "}
-        <b>{Math.min(game.turn, game.maxTurns)}</b>
+        <b>{game.maxTurns ? Math.min(game.turn, game.maxTurns) : game.turn}</b>
+        {game.maxTurns ? <small>/{game.maxTurns}</small> : null}
       </span>
       {seconds !== null ? (
         <strong>
@@ -164,6 +167,7 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [mapPick, setMapPick] = useState(null);
   const [stackPick, setStackPick] = useState(null);
+  const [forecast, setForecast] = useState(null);
   const [encampmentSelection, setEncampmentSelection] = useState({});
   const [newGameSetup, setNewGameSetup] = useState(null);
   const [diplomaticTarget, setDiplomaticTarget] = useState("p2");
@@ -651,6 +655,7 @@ export default function App() {
           routeDisabled={routeDisabled}
           soundEnabled={soundEnabled}
           volume={volume}
+          onForecast={setForecast}
         />
         {mapPick ? (
           <section className="map-target-toolbar" aria-label="지도에서 영토 선택">
@@ -905,7 +910,7 @@ export default function App() {
           ) : null}
         </div>
         {selected && tile && !mapPick && !stackPick ? (
-          <div className="selection-dock">
+          <div className={`selection-dock ${unit && forecast ? "has-forecast" : ""}`}>
             {unit || city || contact ? (
               <TileCompanion game={game} tile={tile} />
             ) : null}
@@ -949,6 +954,7 @@ export default function App() {
                 onCitizenSettings={api.citizenSettings}
               />
             )}
+            {unit && !contact ? <CombatForecast forecast={forecast} /> : null}
           </div>
         ) : null}
         {modal === "saves" ? (
@@ -1615,7 +1621,7 @@ export default function App() {
                   }}
                 >
                   <UnitIcon type={u.type} />
-                  {label(u)} {TYPES[u.type].name} ×{u.size}
+                  {label(u)} {TYPES[u.type].name} {u.size > 1 ? formationTierName(u.size) : ""} ×{u.size}
                   <Icon name="merge" />
                 </button>
               ))}
