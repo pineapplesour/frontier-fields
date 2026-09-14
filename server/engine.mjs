@@ -2232,6 +2232,7 @@ export function restoreRuntimeGame(
     g.finishedBy = "turnLimit";
     g.maxTurns = MAX_TURNS;
   }
+  normalizeState(g);
   normalizeUnitManpower(g);
   ensureEconomyState(g);
   ensureTileFeatures(g);
