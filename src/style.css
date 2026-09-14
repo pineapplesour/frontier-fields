@@ -669,7 +669,7 @@ small {
   transform: translateX(-50%);
   width: var(--dock-width);
   min-height: 142px;
-  z-index: 4;
+  z-index: 7;
   background: #ffffffed;
   backdrop-filter: blur(16px);
   border: 1px solid #e2e9df;
@@ -1712,7 +1712,8 @@ input {
   transform: translateX(-50%);
   width: var(--dock-width);
   max-height: min(220px, calc(100dvh - var(--dock-bottom) - 20px));
-  z-index: 4;
+  /* Above map unit/city labels (z-index 5) so names never show through the card. */
+  z-index: 7;
 }
 .selection-dock.has-forecast {
   display: flex;

@@ -67,7 +67,15 @@ export const NPC_STRATEGY = Object.freeze({
   STAGING_DISTANCE: 4, // offensive march stops on this ring around the objective (just outside city vision)
   MERGE_MIN_ARMY: 4, // quiet-time merging into brigades/divisions starts at this army size
   // --- growth and buildup ---------------------------------------------------
-  MAX_CITIES: 4, // NPC civs found up to this many cities
+  MAX_CITIES: 8, // land-based cap: sites must also lie within 8 tiles of an own city
+  SETTLER_MIN_POP: 3, // the settler city keeps growing past this
+  SETTLERS_IN_FLIGHT_PER_CITIES: 2, // one settler in flight per this many cities (min 1)
+  SETTLER_BUY_RESERVE: 80, // buy a settler with gold when gold >= price + reserve
+  SITE_RESOURCE_BONUS: 6, // per strategic resource tile in the site's ring
+  SITE_HILLS_BONUS: 2, // defensible city tile
+  SITE_RIVER_BONUS: 2, // adjacent river edge
+  SITE_CONTESTED_BONUS: 3, // rival territory within 3: claim it first
+  SITE_IDEAL_SPACING: 4, // compact borders: preferred distance to the nearest own city
   ARMY_PER_CITY: 2, // baseline army size per city
   ARMY_POP_DIVISOR: 3, // plus one unit per this much population
   ARMY_PARITY_RATIO: 1.0, // keep army power >= strongest neighbour's visible power * ratio
@@ -161,6 +169,14 @@ export function settlementSites(view, settler) {
   const own = view.cities.filter((c) => c.owner === view.playerId && !c.camp);
   const tiles = new Map(view.tiles.map((t) => [key(t), t]));
   const threats = view.units.filter((u) => u.hostile && military(u));
+  const S = NPC_STRATEGY;
+  const rivers = view.rivers ?? [];
+  const riverside = (t) =>
+    rivers.some((e) => equal(e.a, t) || equal(e.b, t));
+  const contested = (t) =>
+    view.tiles.some(
+      (p) => p.owner && p.owner !== view.playerId && distance(p, t) <= 3,
+    );
   return view.tiles
     .filter(
       (t) =>
@@ -191,15 +207,21 @@ export function settlementSites(view, settler) {
         (n, p) =>
           n +
           (p.terrain === "plains" ? p.fertility + 1 : 0) +
-          (p.resource ? 3 : 0),
+          (p.resource ? S.SITE_RESOURCE_BONUS : 0),
         0,
       );
       const spacing = own.length
         ? Math.min(...own.map((c) => distance(c, t)))
-        : 0;
+        : S.SITE_IDEAL_SPACING;
       return {
         tile: t,
-        score: quality - distance(settler, t) * 1.1 - Math.abs(spacing - 5) * 2,
+        score:
+          quality -
+          distance(settler, t) * 1.1 -
+          Math.abs(spacing - S.SITE_IDEAL_SPACING) * 2 +
+          (t.terrain === "hills" ? S.SITE_HILLS_BONUS : 0) +
+          (riverside(t) ? S.SITE_RIVER_BONUS : 0) +
+          (contested(t) ? S.SITE_CONTESTED_BONUS : 0),
       };
     })
     .sort((a, b) => b.score - a.score || stable(a.tile, b.tile))
@@ -257,6 +279,42 @@ export function npcEconomy(view) {
     Math.ceil((view.economy.population ?? 0) / S.ARMY_POP_DIVISOR);
   const armyShort =
     army.length < armyTarget || armyPower < neighbourPower * S.ARMY_PARITY_RATIO;
+  // Expansion is a first-class priority: the best-food city with a garrison
+  // produces (or buys) settlers while legal sites remain and the cap allows.
+  const sites = settlementSites(view, {
+    ...(cities[0] ?? { q: 0, r: 0 }),
+    type: "settler",
+  });
+  const settlersWanted =
+    cities.length < S.MAX_CITIES &&
+    sites.length > 0 &&
+    count("settler") <
+      Math.max(1, Math.floor(cities.length / S.SETTLERS_IN_FLIGHT_PER_CITIES));
+  const garrisoned = (c) => army.some((u) => distance(u, c) <= 1);
+  const settlerCity = settlersWanted
+    ? cities
+        .filter((c) => c.population >= S.SETTLER_MIN_POP)
+        .sort(
+          (a, b) =>
+            (garrisoned(b) ? 1 : 0) - (garrisoned(a) ? 1 : 0) ||
+            (b.foodNet ?? 0) - (a.foodNet ?? 0) ||
+            b.population - a.population ||
+            stable(a, b),
+        )[0] ?? null
+    : null;
+  let settlerPlanned = false;
+  if (
+    settlerCity &&
+    (garrisoned(settlerCity) || army.length >= 1) &&
+    gold >= (productionType("settler", settlerCity)?.cost ?? Infinity) + S.SETTLER_BUY_RESERVE &&
+    !units.some((u) => equal(u, settlerCity) && isCivilian(u))
+  ) {
+    plans.push({
+      transaction: { action: "buyUnit", cityId: settlerCity.id, type: "settler" },
+    });
+    gold -= productionType("settler", settlerCity).cost;
+    settlerPlanned = true;
+  }
   const capacityOk = () =>
     view.economy.capacity == null ||
     view.economy.used +
@@ -270,8 +328,18 @@ export function npcEconomy(view) {
       localFoes.length > 0 &&
       localFoes.reduce((n, u) => n + power(u), 0) >
         localArmy.reduce((n, u) => n + power(u), 0) * 0.75;
-    // Do not repeatedly reset a healthy production queue.
-    if (c.queue && !(emergency && ["builder", "settler"].includes(c.queue)))
+    const wantSettlerHere =
+      !settlerPlanned &&
+      settlerCity?.id === c.id &&
+      (garrisoned(c) || army.length >= 1) &&
+      !emergency;
+    // Do not repeatedly reset a healthy production queue, except to start an
+    // overdue settler (once: afterwards the queue is the settler itself).
+    if (
+      c.queue &&
+      !(emergency && ["builder", "settler"].includes(c.queue)) &&
+      !(wantSettlerHere && !["settler", "wallRepair", "walls"].includes(c.queue))
+    )
       continue;
     const counter = () => {
       const horse = localFoes.filter((e) => e.type === "cavalry").length;
@@ -292,17 +360,7 @@ export function npcEconomy(view) {
       encampmentEnabled && encampments < cities.length
         ? encampmentCandidates(view, c, { radius: 3 })[0]
         : null;
-    const settlementReady =
-      view.turn >= 1 &&
-      c.population >= 3 &&
-      cities.length < NPC_STRATEGY.MAX_CITIES &&
-      count("settler") === 0 &&
-      // One surviving escort and one established farm are enough to start a
-      // legal second-city attempt. Requiring a full three-unit army made an
-      // NPC permanently abandon expansion after an unlucky early skirmish.
-      army.length >= 1 &&
-      farms >= cities.length &&
-      settlementSites(view, { ...c, type: "settler" }).length;
+    const settlementReady = wantSettlerHere;
     if (
       !c.queue &&
       c.wallHp > 0 &&
@@ -317,9 +375,10 @@ export function npcEconomy(view) {
     else if (emergency)
       type =
         (c.wallLevel ?? 0) === 0 && localArmy.length >= 2 ? "walls" : counter();
-    else if (settlementReady)
+    else if (settlementReady) {
       type = "settler";
-    else if (
+      settlerPlanned = true;
+    } else if (
       encampmentTarget &&
       !c.queue &&
       view.turn >= 3 &&
@@ -776,15 +835,20 @@ export function npcUnitOrder(view, id) {
         view.turn >= 8 &&
         currentDanger < 5 &&
         !foes.some((e) => distance(e, u) <= 5);
+      const sitesNow = settlementSites(view, u);
+      const goodHere =
+        sitesNow.length === 0 ||
+        sitesNow.slice(0, 3).some((site) => distance(site, u) <= 1);
       if (
         !settlementIssue(view, u) &&
         !t.owner &&
         currentDanger < 5 &&
-        (allies.some((e) => military(e) && distance(e, u) <= 2) ||
+        goodHere &&
+        (allies.some((e) => military(e) && distance(e, u) <= 3) ||
           lateSafeFound)
       )
         return { unitId: id, action: "found" };
-      for (const site of settlementSites(view, u).slice(0, 8)) {
+      for (const site of sitesNow.slice(0, 8)) {
         const path = safePath(site);
         if (!path) continue;
         const step = path.path[Math.min(1, path.path.length - 1)];
@@ -1045,7 +1109,13 @@ export function npcUnitOrder(view, id) {
   }
   const atWar = factionList(view).some((f) => f.id !== "barb" && f.hostile);
   const scouts = allies.filter((e) => e.type === "cavalry").sort(stable);
-  const scout = u.owner === "barb" || scouts[0]?.id === id;
+  const cheap = allies
+    .filter((e) => military(e) && e.type !== "artillery")
+    .sort(stable);
+  const scout =
+    u.owner === "barb" ||
+    scouts[0]?.id === id ||
+    (!scouts.length && !atWar && cheap[0]?.id === id);
   const discovery = (p) =>
     neighbors(p).filter((n) => tiles.get(key(n))?.explored === false).length;
   const rank = (p) =>
