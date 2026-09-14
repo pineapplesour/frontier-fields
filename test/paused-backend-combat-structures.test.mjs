@@ -317,9 +317,10 @@ test("veteran combat advantages remain deterministic and bounded", () => {
     tiles: [tile(3, 3), tile(4, 3, { owner: "p2" })],
     rivers: [],
   };
-  assert.deepEqual(combatRollRange(veteran), [0.94, 1.18]);
-  assert.ok(effectiveCombatMatchup(veteran, defender) > 1.5);
-  assert.ok(unitDamage(veteran, defender, view, 1) >= unitDamage(base, defender, view, 1));
-  assert.ok(unitDamage(veteran, defender, view, 0.94) <= unitDamage(veteran, defender, view, 1.18));
+  // Civ6: the roll is always 75~125%; veterans gain +1 CS per level, no luck shift.
+  assert.deepEqual(combatRollRange(veteran), [0.75, 1.25]);
+  assert.equal(effectiveCombatMatchup(veteran, defender), 1, "cavalry has no Civ6 bonus vs ranged units");
+  assert.ok(unitDamage(veteran, defender, view, 1) > unitDamage(base, defender, view, 1));
+  assert.ok(unitDamage(veteran, defender, view, 0.75) <= unitDamage(veteran, defender, view, 1.25));
   assert.equal(fortBonus({ tiles: [tile(4, 3, { fort: { owner: "p2", hp: 0, captured: false } })] }, defender), 0);
 });

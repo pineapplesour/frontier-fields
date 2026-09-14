@@ -29,12 +29,6 @@ import {
   structureWallHp,
 } from "./structures.js";
 
-export const COMBAT_ROLL_MIN = 0.88;
-export const COMBAT_ROLL_MAX = 1.12;
-export const VETERAN_LUCK_PER_LEVEL = 0.015;
-export const VETERAN_LUCK_CAP = 0.06;
-export const VETERAN_ATTACK_PER_LEVEL = 0.1;
-export const COUNTER_MATCHUP_VETERAN_PER_LEVEL = 0.03;
 
 // ---------------------------------------------------------------------------
 // Combat outcome rules (2026-09-15 user request).
@@ -60,20 +54,22 @@ export const MIN_SURVIVOR_HP = 1;
 // The host balance setting `counterMultiplier` still scales melee return fire
 // on top of these. Veteran matchup mastery (up to +12%) stacks on the
 // advantage only.
-export const COUNTER_ADVANTAGE_MULTIPLIER = 2;
-export const COUNTER_DISADVANTAGE_MULTIPLIER = 0.75;
+// Legacy multiplier view of the Civ6 anti-cavalry bonus (+10 CS ≈ e^(10/25) ≈ 1.49×).
+export const COUNTER_ADVANTAGE_MULTIPLIER = Math.exp(10 / 25);
+export const COUNTER_DISADVANTAGE_MULTIPLIER = Math.exp(-10 / 25);
 
 // Attack and defense strength scale linearly with remaining HP and no floor:
 // 50% HP → −50%, 10% HP → −90%. `woundedPenalty` (experiment stat) is the
 // penalty at 0 HP in percent; the default of 100 gives factor = hp / maxHp.
-export const WOUNDED_PENALTY_MAX = 100;
+// Superseded by the Civ6 wounded rule (−10 CS at 0 HP); kept as a ratio helper.
 export const woundedFactor = (u) =>
-  1 - (unitStat(u, "woundedPenalty", WOUNDED_PENALTY_MAX) / 100) *
-    (1 - Math.max(0, Math.min(1, (u?.hp ?? 0) / maxHealth(u))));
+  Math.max(0, Math.min(1, (u?.hp ?? 0) / maxHealth(u)));
 export const COMBAT_XP_PARTICIPATION = 1;
 export const COMBAT_XP_KILL = 3;
 export const COMBAT_XP_UNDERDOG_KILL = 5;
-export const UNDERDOG_STRENGTH_RATIO = 1.5;
+// Additive CS scale: an enemy 10 CS stronger deals ≈1.5× (e^(10/25)) damage.
+export const UNDERDOG_STRENGTH_GAP = 10;
+export const UNDERDOG_STRENGTH_RATIO = Math.exp(UNDERDOG_STRENGTH_GAP / 25);
 
 /** Formation tiers: 1 unit = 대대, 2 = 여단, 4 = 사단. Size 3 is a legacy formation. */
 export const FORMATION_TIERS = { 1: "battalion", 2: "brigade", 4: "division" };
@@ -113,7 +109,7 @@ export function unfavorableFight(view, us, enemy, usAttacking = true) {
   const ours = combatStrength(us, !usAttacking, view, enemy);
   const theirs = combatStrength(enemy, usAttacking, view, us);
   return (
-    theirs >= ours * UNDERDOG_STRENGTH_RATIO ||
+    theirs - ours >= UNDERDOG_STRENGTH_GAP ||
     combatMatchup(enemy, us) > 1 ||
     (Number(enemy.size) || 1) > (Number(us.size) || 1)
   );
@@ -122,95 +118,180 @@ export function unfavorableFight(view, us, enemy, usAttacking = true) {
 export const killXp = (unfavorable) =>
   unfavorable ? COMBAT_XP_UNDERDOG_KILL : COMBAT_XP_KILL;
 
-// Experience shifts the same seeded distribution slightly upward. It is a
-// small luck edge, while the level multiplier in combatStrength remains the
-// main source of veteran advantage; this cannot turn a bad matchup into a
-// coin flip.
-export function combatRollRange(u) {
-  const luck = Math.min(
-    VETERAN_LUCK_CAP,
-    Math.max(0, level(u?.xp ?? 0) - 1) * VETERAN_LUCK_PER_LEVEL,
+
+// ---------------------------------------------------------------------------
+// Civilization VI combat model (user decision 2026-09-15: "문명6 시스템 그대로").
+// Sources: civilization.fandom.com/wiki/Combat_(Civ6), City_combat_(Civ6),
+// Corps_(Civ6), Walls_(Civ6); forums.civfanatics.com "Hans Lemurson figures
+// out the Combat Formula".
+//   damage = 30 · e^((attackerCS − defenderCS) / 25) · U(0.75, 1.25)
+//   melee: both sides roll the same formula against each other (attacker's
+//   CS vs defender's CS and the reverse); ranged/bombard: only the attacker
+//   deals damage. Modifiers are additive combat strength (CS).
+// ---------------------------------------------------------------------------
+export const CIV6 = Object.freeze({
+  BASE_DAMAGE: 30,
+  EXP_DIVISOR: 25,
+  ROLL_MIN: 0.75,
+  ROLL_MAX: 1.25,
+  WOUND_PENALTY_MAX: 10, // linear, −10 CS at 0 HP
+  FORTIFY_ONE_TURN: 3,
+  FORTIFY_TWO_TURNS: 6,
+  HILLS_DEFENSE: 3,
+  FORT_DEFENSE: 4,
+  RIVER_ATTACK: -5,
+  RECENT_CROSSING: -3, // this game's "도하 후" state, mapped onto the CS scale
+  ISOLATION_MAX: -10, // supply cut-off, scaled from the game's siege penalty
+  FLANK_PER_UNIT: 2,
+  SUPPORT_PER_UNIT: 2,
+  ANTI_CAVALRY_VS_CAVALRY: 10, // spearman vs cavalry, attacking or defending
+  MELEE_VS_ANTI_CAVALRY: 5, // cavalry vs spearman
+  BOMBARD_VS_UNITS: -17, // artillery attacking a unit
+  VETERAN_PER_LEVEL: 1, // this game's XP levels, +1 CS per level above 1
+  CORPS_BONUS: 10, // 여단 (2 units)
+  ARMY_BONUS: 17, // 사단 (4 units; legacy 3-unit formations too)
+  WALL_HP_PER_LEVEL: 50,
+  WALL_CS_PER_LEVEL: 3,
+  MELEE_VS_WALLS: 0.15,
+  RANGED_VS_WALLS: 0.5,
+  BOMBARD_VS_WALLS: 1,
+  RANGED_VS_CITY_HP: 0.5,
+  CITY_HEAL_PER_TURN: 20,
+});
+export const COMBAT_ROLL_MIN = CIV6.ROLL_MIN;
+export const COMBAT_ROLL_MAX = CIV6.ROLL_MAX;
+
+/** Deterministic roll range; the engine draws inside it from the seeded RNG. */
+export function combatRollRange() {
+  return [CIV6.ROLL_MIN, CIV6.ROLL_MAX];
+}
+export const rollFromRandom = (random) =>
+  CIV6.ROLL_MIN + Math.max(0, Math.min(1, random)) * (CIV6.ROLL_MAX - CIV6.ROLL_MIN);
+
+/** Civ6 damage for one side of a combat. */
+export function civDamage(attackerStrength, defenderStrength, roll = 1) {
+  return Math.max(
+    1,
+    Math.round(
+      CIV6.BASE_DAMAGE *
+        Math.exp((attackerStrength - defenderStrength) / CIV6.EXP_DIVISOR) *
+        roll,
+    ),
   );
-  return [
-    Number((COMBAT_ROLL_MIN + luck).toFixed(2)),
-    Number((COMBAT_ROLL_MAX + luck).toFixed(2)),
-  ];
 }
 
-export function veteranAttackMultiplier(u) {
-  return 1 + Math.min(
-    0.4,
-    Math.max(0, level(u?.xp ?? 0) - 1) * VETERAN_ATTACK_PER_LEVEL,
-  );
+export function formationBonus(u) {
+  const size = Number(u?.size) || 1;
+  return size >= 3 ? CIV6.ARMY_BONUS : size === 2 ? CIV6.CORPS_BONUS : 0;
 }
+export function woundedPenalty(u) {
+  const ratio = Math.max(0, Math.min(1, (u?.hp ?? 0) / maxHealth(u)));
+  return -CIV6.WOUND_PENALTY_MAX * (1 - ratio);
+}
+export const veteranBonus = (u) =>
+  Math.max(0, level(u?.xp ?? 0) - 1) * CIV6.VETERAN_PER_LEVEL;
+export const isRangedType = (u) => (TYPES[u?.type]?.range ?? 1) > 1;
 
 const tileAt = (view, p) =>
   (view?.tiles ?? []).find((t) => equal(t, p));
+const militaryUnit = (u) => u && u.hp > 0 && !isCivilian(u) && TYPES[u.type]?.attack;
+
+/** Number of the attacker's other military units adjacent to the target. */
+export function flankingCount(view, attacker, target) {
+  if (!attacker || !target) return 0;
+  const seen = new Set();
+  for (const u of view?.units ?? [])
+    if (militaryUnit(u) && u.owner === attacker.owner && u.id !== attacker.id &&
+        distance(u, target) === 1 && !equal(u, attacker)) seen.add(`${u.q},${u.r}`);
+  return seen.size;
+}
+/** Number of the defender's other military units adjacent to it. */
+export function supportCount(view, defender) {
+  if (!defender) return 0;
+  const seen = new Set();
+  for (const u of view?.units ?? [])
+    if (militaryUnit(u) && u.owner === defender.owner && u.id !== defender.id &&
+        distance(u, defender) === 1) seen.add(`${u.q},${u.r}`);
+  return seen.size;
+}
+
+function typeBonus(u, other) {
+  if (!u || !other || !other.type) return 0;
+  if (u.type === "spearman" && other.type === "cavalry") return CIV6.ANTI_CAVALRY_VS_CAVALRY;
+  if (u.type === "cavalry" && other.type === "spearman") return CIV6.MELEE_VS_ANTI_CAVALRY;
+  return 0;
+}
 
 /**
- * Position modifiers apply to the attacker's origin only. Defensive terrain,
- * fortification and occupied-fort bonuses stay in the defending branch below,
- * so a hill target is never counted twice as an attacker advantage.
+ * Additive combat-strength breakdown of one side. `defending` selects the
+ * defense stat and defensive modifiers; `target` is the other side (a unit or
+ * a city) and may be null for a context-free display value.
  */
-export function attackPositionBonus(a, target, view = {}) {
-  if (!a || !target) return { value: 0, reasons: [] };
-  let value = 0;
-  const reasons = [];
-  const origin = tileAt(view, a), destination = tileAt(view, target);
-  if (origin?.terrain === "hills" && destination?.terrain === "plains") {
-    value += 0.1;
-    reasons.push("구릉지 고지 공격 +10%");
-  }
-  const city = (view.cities ?? []).find(
-    (c) => c.owner === a.owner && c.hp > 0 && equal(c, a),
-  );
-  if (city) {
-    value += 0.1;
-    // A surviving city remains a useful firing position after its wall falls;
-    // wallHP controls bombard capability/defense, not this origin bonus.
-    reasons.push("아군 도시 주둔 공격 +10%");
-  }
-  const structure = structureAt(view, a);
-  if (structurePositionBonus(view, a)) {
-    value += structurePositionBonus(view, a);
-    reasons.push(
-      structureKind(structure) === "encampment"
-        ? "아군 주둔지 위치 공격 +10%"
-        : "아군 요새 주둔 공격 +10%",
-    );
-  }
-  return { value: Math.min(0.3, value), reasons };
-}
-
-export function combatStrength(u, defending, view = {}, target = null) {
+export function strengthBreakdown(u, defending, view = {}, target = null) {
   const safeView = { ...view, tiles: view.tiles ?? [] };
+  const terms = [];
+  const add = (label, value) => { if (value) terms.push({ label, value: Math.round(value * 10) / 10 }); };
+  // Civ6 semantics: a melee unit has one combat strength used both ways; a
+  // ranged unit fires with its ranged strength (attack) and defends with its
+  // weaker melee strength (defense).
+  const base = defending && isRangedType(u)
+    ? unitStat(u, "defense", TYPES[u.type]?.defense ?? 0)
+    : unitStat(u, "attack", unitAttackValue(safeView, u.type));
+  add(formationTierName(u.size) + " 편제", formationBonus(u));
+  add("베테랑", veteranBonus(u));
+  add("부상", woundedPenalty(u));
+  if (u.isolation)
+    add("보급 단절", Math.max(CIV6.ISOLATION_MAX, -Math.round(siegePenalty(u.isolation) * 20)));
+  if (u.riverTurns > 0) add("도하 직후", CIV6.RECENT_CROSSING);
   const tile = tileAt(safeView, u);
-  const bonus = defending
-    ? (TERRAINS[tile?.terrain]?.defense ?? 0) +
-      (u.fortified ? 0.25 : 0) +
-      fortBonus(safeView, u)
-    : attackPositionBonus(u, target, safeView).value;
-  return (
-    (defending ? unitStat(u, "defense", TYPES[u.type].defense) : unitStat(u, "attack", unitAttackValue(safeView, u.type))) *
-    // A formation's attack and health are literal sums of its constituent
-    // units. No legacy diminishing/soft cap remains here.
-    u.size *
-    (defending ? 1 : veteranAttackMultiplier(u)) *
-    (1 + bonus) *
-    woundedFactor(u) *
-    (1 - (u.isolation ? unitStat(u, "isolationPenalty", siegePenalty(u.isolation) * 100) / 100 : 0)) *
-    (u.riverTurns > 0 ? 1 - unitStat(u, "riverPenalty", 20) / 100 : 1) *
-    (defending ? 1 - jointAttackPenalty(view, u, target).penalty : 1)
-  );
+  const targetIsUnit = !!target?.type;
+  if (defending) {
+    if (tile?.terrain === "hills") add("구릉지 방어", CIV6.HILLS_DEFENSE);
+    if (u.fortified) add("방어 태세", CIV6.FORTIFY_TWO_TURNS);
+    else if (u.fortifyPending) add("방어 준비", CIV6.FORTIFY_ONE_TURN);
+    if (fortBonus(safeView, u) > 0)
+      add(structureKind(structureAt(safeView, u)) === "encampment" ? "주둔지" : "요새", CIV6.FORT_DEFENSE);
+    const support = supportCount(safeView, u);
+    if (support) add(`지원 ${support}부대`, support * CIV6.SUPPORT_PER_UNIT);
+    if (targetIsUnit) add("병종 상성", typeBonus(u, target));
+  } else {
+    if (target && u.type !== "artillery" && riverBetween(safeView, u, target)) add("강 건너 공격", CIV6.RIVER_ATTACK);
+    if (target) {
+      const flank = flankingCount(safeView, u, target);
+      if (flank) add(`측면 ${flank}부대`, flank * CIV6.FLANK_PER_UNIT);
+    }
+    if (targetIsUnit) {
+      add("병종 상성", typeBonus(u, target));
+      if (u.type === "artillery") add("포병 대유닛", CIV6.BOMBARD_VS_UNITS);
+    }
+  }
+  const total = base + terms.reduce((n, t) => n + t.value, 0);
+  return { base, terms, total: Math.round(total * 10) / 10 };
 }
 
+/** Numeric combat strength (additive CS). */
+export function combatStrength(u, defending, view = {}, target = null) {
+  return strengthBreakdown(u, defending, view, target).total;
+}
+
+/** City combat strength: the better of its garrison and its own defenses. */
+export function cityStrength(view, city, attacker = null) {
+  if (!city) return 0;
+  const own = cityCounterAttack(city, view) +
+    (cityWallHp(city) > 0 ? (city.wallLevel ?? 0) * CIV6.WALL_CS_PER_LEVEL : 0);
+  const garrison = (view?.units ?? [])
+    .filter((u) => u.owner === city.owner && u.hp > 0 && militaryUnit(u) && equal(u, city))
+    .map((u) => strengthBreakdown(u, true, view, attacker).total);
+  return Math.round(Math.max(own, ...garrison) * 10) / 10;
+}
+
+/** Legacy hook kept for callers; Civ6 has no attacker position bonus. */
+export function attackPositionBonus() {
+  return { value: 0, reasons: [] };
+}
 export function jointAttackPenalty(view, defender, attacker) {
-  if (!attacker || isCivilian(defender)) return { count: 0, penalty: 0 };
-  const adjacent = new Set((view.units ?? []).filter((u) =>
-    u.hp > 0 && u.owner === attacker.owner && !isCivilian(u) && distance(u, defender) === 1,
-  ).map((u) => `${u.q},${u.r}`));
-  const count = adjacent.size;
-  return { count, penalty: count < 2 ? 0 : Math.min(0.5, (count - 1) * unitStat(defender, "jointPenalty", 10) / 100) };
+  const count = attacker ? flankingCount(view, attacker, defender) + 1 : 0;
+  return { count, penalty: 0 };
 }
 
 /** Return the straight hex line on the flat map, including both endpoints. */
@@ -319,26 +400,15 @@ export function hasLineOfSight(view, a, b) {
     .every((point) => !blockers.some((u) => equal(u, point)));
 }
 
+/** Counter-type relation as a CS advantage (kept for the XP underdog rule). */
 export function combatMatchup(a, b) {
-  if (!a || !b) return 1;
-  if (a.type === "cavalry" && b.type === "musketeer") return COUNTER_ADVANTAGE_MULTIPLIER;
-  if (a.type === "spearman" && b.type === "cavalry") return COUNTER_ADVANTAGE_MULTIPLIER;
-  if (b.type === "artillery" && distance(a, b) === 1 && a.type !== "artillery")
-    return COUNTER_ADVANTAGE_MULTIPLIER;
-  return 1;
+  return a && b && typeBonus(a, b) > typeBonus(b, a) ? 1 + typeBonus(a, b) / 25 : 1;
 }
-
-/** Damage scale for an attacker striking into the type that counters it (역상성). */
 export function matchupDisadvantage(a, b) {
-  if (!a || !b) return 1;
-  return combatMatchup(b, a) > 1 ? COUNTER_DISADVANTAGE_MULTIPLIER : 1;
+  return combatMatchup(b, a) > 1 ? 1 - typeBonus(b, a) / 25 : 1;
 }
-
 export function effectiveCombatMatchup(a, b) {
-  const base = combatMatchup(a, b);
-  if (base <= 1) return base;
-  const veteranLevels = Math.max(0, level(a?.xp ?? 0) - 1);
-  return base * (1 + Math.min(0.12, veteranLevels * COUNTER_MATCHUP_VETERAN_PER_LEVEL));
+  return combatMatchup(a, b);
 }
 
 export const ammunitionCost = (unit) =>
@@ -397,17 +467,34 @@ export function ammunitionState(view, unit) {
 }
 
 export function unitDamage(a, b, view, roll = 1) {
-  return Math.max(
-    6,
-    Math.round(
-      ((27 * combatStrength(a, false, view, b)) /
-        Math.max(8, combatStrength(b, true, view, a))) *
-        effectiveCombatMatchup(a, b) *
-        matchupDisadvantage(a, b) *
-        (a.type !== "artillery" && riverBetween(view, a, b) ? 1 - unitStat(a, "crossingPenalty", 25) / 100 : 1) *
-        roll,
-    ),
+  return civDamage(
+    strengthBreakdown(a, false, view, b).total,
+    strengthBreakdown(b, true, view, a).total,
+    roll,
   );
+}
+/** Damage the defender deals back in melee (before the host counterMultiplier). */
+export function counterDamage(a, b, view, roll = 1) {
+  return civDamage(
+    strengthBreakdown(b, true, view, a).total,
+    strengthBreakdown(a, false, view, b).total,
+    roll,
+  );
+}
+
+/**
+ * One full unit-vs-unit exchange: the single source of truth for both the
+ * engine and the hover forecast. Rolls default to the exact expected value.
+ */
+export function unitExchange(view, a, b, { attackRoll = 1, counterRoll = 1 } = {}) {
+  const attacker = strengthBreakdown(a, false, view, b);
+  const defender = strengthBreakdown(b, true, view, a);
+  const melee = !isRangedType(a) && distance(a, b) === 1 && !!militaryUnit(b);
+  const dealt = civDamage(attacker.total, defender.total, attackRoll);
+  const received = melee
+    ? Math.round(civDamage(defender.total, attacker.total, counterRoll) * counterMultiplier(view))
+    : 0;
+  return { attacker, defender, melee, dealt, received };
 }
 
 export function cityWallHp(c) {
@@ -429,26 +516,47 @@ export function cityWallHp(c) {
   );
 }
 
-export function cityDamage(a, c, view, roll = 1) {
-  const activeWalls = cityWallHp(c) > 0;
-  return Math.max(
-    1,
-    Math.round(
-      (26 *
-        (combatStrength(a, false, view, c) / 28) *
-        (a.type === "artillery" ? 1.35 : 1) *
-        (a.type !== "artillery" && riverBetween(view, a, c) ? 0.75 : 1) *
-        roll) /
-        (1 +
-          (activeWalls ? c.wallLevel ?? 0 : 0) *
-            (a.type === "artillery" ? 0.1 : 0.2)),
-    ),
-  );
-}
+export const cityAttackKind = (a) =>
+  a?.type === "artillery" ? "bombard" : isRangedType(a) ? "ranged" : "melee";
 
+/**
+ * One attack on a city (Civ6 walls model): while walls stand the hit lands on
+ * the wall pool scaled by attack kind (melee 15%, ranged 50%, bombard 100%);
+ * once walls are down the body takes it (ranged 50%). An adjacent melee
+ * attacker takes the city's return blow with the same formula.
+ */
+export function cityExchange(view, a, c, { attackRoll = 1, counterRoll = 1 } = {}) {
+  const attacker = strengthBreakdown(a, false, view, c);
+  const defense = cityStrength(view, c, a);
+  const raw = civDamage(attacker.total, defense, attackRoll);
+  const kind = cityAttackKind(a);
+  const wallHp = cityWallHp(c);
+  const bodyHp = Math.max(0, Number(c.hp) || 0);
+  const bodyMultiplier = kind === "ranged" ? CIV6.RANGED_VS_CITY_HP : 1;
+  let wallDamage = 0, bodyDamage = 0;
+  if (wallHp > 0) {
+    const scaled = Math.max(1, Math.round(raw * (kind === "melee" ? CIV6.MELEE_VS_WALLS : kind === "ranged" ? CIV6.RANGED_VS_WALLS : CIV6.BOMBARD_VS_WALLS)));
+    wallDamage = Math.min(wallHp, scaled);
+    // Walls absorb first; only the part that breaks through a falling wall
+    // reaches the body, at the body multiplier.
+    bodyDamage = Math.min(bodyHp, Math.round((scaled - wallDamage) * bodyMultiplier));
+  } else
+    bodyDamage = Math.min(bodyHp, Math.max(1, Math.round(raw * bodyMultiplier)));
+  const melee = kind === "melee" && distance(a, c) === 1 && bodyHp > 0;
+  // A host may zero the city's own strength; with no garrison that city has no return blow.
+  const received = melee && defense > 0 ? civDamage(defense, attacker.total, counterRoll) : 0;
+  return { attacker, defense, kind, raw, wallDamage, bodyDamage, dealt: wallDamage + bodyDamage, received, melee };
+}
+export function cityDamage(a, c, view, roll = 1) {
+  return cityExchange(view, a, c, { attackRoll: roll }).dealt;
+}
 export function cityDamageRange(a, c, view) {
-  const [low, high] = combatRollRange(a);
-  return [cityDamage(a, c, view, low), cityDamage(a, c, view, high)];
+  return [cityDamage(a, c, view, CIV6.ROLL_MIN), cityDamage(a, c, view, CIV6.ROLL_MAX)];
+}
+/** City ranged strike / return fire against a unit. */
+export function cityStrikeDamage(view, city, unit, roll = 1) {
+  const cs = cityStrength(view, city);
+  return cs > 0 ? civDamage(cs, strengthBreakdown(unit, true, view, null).total, roll) : 0;
 }
 
 const outcome = (hp, bounds) => ({
@@ -551,18 +659,17 @@ export function cityCapturePreview(
  * Deterministic bounds use the shared ±12% roll; the engine draws the actual
  * roll from the match's seeded random.
  */
-export function cityCounterDamage(city, view, roll = 1) {
-  return Math.round(cityCounterAttack(city, view) * roll);
+export function cityCounterDamage(city, view, roll = 1, unit = null) {
+  return unit
+    ? cityStrikeDamage(view, city, unit, roll)
+    : civDamage(cityStrength(view, city), 0, roll);
 }
-export function cityCounterRange(city, view) {
-  return [
-    cityCounterDamage(city, view, COMBAT_ROLL_MIN),
-    cityCounterDamage(city, view, COMBAT_ROLL_MAX),
-  ];
+export function cityCounterRange(city, view, unit = null) {
+  return [cityCounterDamage(city, view, CIV6.ROLL_MIN, unit), cityCounterDamage(city, view, CIV6.ROLL_MAX, unit)];
 }
-
 // A rule explanation based solely on a player's observation, never a hidden-
-// state simulation or a Monte Carlo estimate.
+// state simulation. Numbers come from the same unitExchange / cityExchange the
+// engine resolves with; only the roll differs (0.75 / 1.0 / 1.25 here).
 export function combatPreview(view, a, b) {
   if (!a || !b || !TYPES[a.type]?.attack || b.owner === a.owner || b.ghost)
     return null;
@@ -612,81 +719,45 @@ export function combatPreview(view, a, b) {
     reasons.push("도시 본체가 파괴될 때까지 주둔 부대가 보호돼요");
   if (b.hostile === false) reasons.push("선전포고 필요");
   if (directCity && b.hp <= 0) reasons.push("도시가 이미 파괴됨");
-  if (a.riverTurns > 0) reasons.push(`도하 후 공격력 −${unitStat(a, "riverPenalty", 20)}%`);
-  if (a.type !== "artillery" && riverBetween(view, a, b))
-    reasons.push(`강 건너 공격 피해 −${unitStat(a, "crossingPenalty", 25)}%`);
-  if (a.isolation)
-    reasons.push(
-      `공격자 보급 단절 −${unitStat(a, "isolationPenalty", Math.round(siegePenalty(a.isolation) * 100))}%`,
-    );
-  const injury = Math.round((1 - woundedFactor(a)) * 1000) / 10;
-  if (injury > 0) reasons.push(`부상 · 체력 ${Math.round(a.hp / maxHealth(a) * 100)}% · 공격력 −${Math.round(injury * 10) / 10}%`);
-  const position = attackPositionBonus(a, b, view);
-  reasons.push(...position.reasons);
-  const terrain = tileAt(view, b);
-  if (!city && terrain?.terrain === "hills") reasons.push("구릉지 방어력 +20%");
-  if (b.fortified) reasons.push("방어 태세 방어력 +25%");
-  if (!city && fortBonus(view, b))
-    reasons.push(
-      `${structureKind(structureAt(view, b)) === "encampment" ? "아군 주둔지" : "아군 요새"} 주둔 방어력 +25%`,
-    );
-  if (b.riverTurns > 0) reasons.push(`방어자 도하 후 방어력 −${unitStat(b, "riverPenalty", 20)}%`);
-  if (b.isolation)
-    reasons.push(
-      `방어자 보급 단절 −${unitStat(b, "isolationPenalty", Math.round(siegePenalty(b.isolation) * 100))}%`,
-    );
-  const joint = jointAttackPenalty(view, b, a);
-  if (!city && joint.penalty)
-    reasons.push(`합동공격 · 인접 ${joint.count}방향 · 방어력 −${Math.round(joint.penalty * 100)}%`);
-  if (!city && effectiveCombatMatchup(a, b) > 1)
-    reasons.push(
-      `병종 상성 피해 +${Math.round((effectiveCombatMatchup(a, b) - 1) * 100)}%`,
-    );
-  if (!city && effectiveCombatMatchup(a, b) > combatMatchup(a, b))
-    reasons.push("베테랑 상성 숙련 보정");
-  if (!city && matchupDisadvantage(a, b) < 1)
-    reasons.push(
-      `역상성 피해 −${Math.round((1 - matchupDisadvantage(a, b)) * 100)}%`,
-    );
-  if (city && b.wallLevel && cityWallHp(b) > 0)
-    reasons.push(`성벽 ${b.wallLevel}레벨 방어`);
-  if (city && b.wallLevel && cityWallHp(b) <= 0)
-    reasons.push("성벽 파괴 · 도시 포격 방어 보너스 없음");
 
-  const rawDealt = city
-    ? cityDamageRange(a, cityTarget, view)
-    : (() => {
-        const [low, high] = combatRollRange(a);
-        return [unitDamage(a, b, view, low), unitDamage(a, b, view, high)];
-      })();
+  const [low, high] = combatRollRange();
+  const sign = (n) => (n > 0 ? `+${n}` : `${n}`);
+  let exchange, exchangeLow, exchangeHigh, attackStrength, defenseStrength, attackerTerms, defenderTerms = [];
+  if (city) {
+    exchange = cityExchange(view, a, cityTarget);
+    exchangeLow = cityExchange(view, a, cityTarget, { attackRoll: low, counterRoll: low });
+    exchangeHigh = cityExchange(view, a, cityTarget, { attackRoll: high, counterRoll: high });
+    attackStrength = exchange.attacker.total;
+    defenseStrength = exchange.defense;
+    attackerTerms = exchange.attacker.terms;
+    for (const t of attackerTerms) reasons.push(`공격 ${t.label} ${sign(t.value)}`);
+    reasons.push(`도시 전투력 ${defenseStrength}${cityWallHp(cityTarget) > 0 ? ` · 성벽 ${cityTarget.wallLevel ?? 0}레벨` : ""}`);
+    if (cityWallHp(cityTarget) > 0)
+      reasons.push(
+        exchange.kind === "melee"
+          ? "성벽이 서 있는 동안 근접 공격은 성벽에 15%만 피해"
+          : exchange.kind === "ranged"
+            ? "성벽이 서 있는 동안 사격은 성벽에 50% 피해"
+            : "포격은 성벽에 100% 피해",
+      );
+    else if (exchange.kind === "ranged") reasons.push("성벽 파괴 · 사격은 도시 본체에 50% 피해");
+    if (exchange.melee) reasons.push(`도시 반격 ${exchangeLow.received}~${exchangeHigh.received}`);
+  } else {
+    exchange = unitExchange(view, a, b);
+    exchangeLow = unitExchange(view, a, b, { attackRoll: low, counterRoll: low });
+    exchangeHigh = unitExchange(view, a, b, { attackRoll: high, counterRoll: high });
+    attackStrength = exchange.attacker.total;
+    defenseStrength = exchange.defender.total;
+    attackerTerms = exchange.attacker.terms;
+    defenderTerms = exchange.defender.terms;
+    for (const t of attackerTerms) reasons.push(`공격 ${t.label} ${sign(t.value)}`);
+    for (const t of defenderTerms) reasons.push(`방어 ${t.label} ${sign(t.value)}`);
+    if (!exchange.melee) reasons.push(isRangedType(a) ? "원거리 공격 · 반격 없음" : "반격 없음");
+  }
+  const rawDealt = [exchangeLow.dealt, exchangeHigh.dealt];
   const targetHp = city ? cityTarget.hp + cityWallHp(cityTarget) : b.hp;
-  const dealt = protectedTarget
-    ? [0, 0]
-    : rawDealt.map((n) => Math.min(targetHp, n));
-  const counter =
-    !city && range === 1 && !isCivilian(b) && a.type !== "artillery";
-  const cityCounter =
-    city && range === 1 && a.type !== "artillery" && cityTarget.hp > 0;
-  if (counter && effectiveCombatMatchup(b, a) > 1)
-    reasons.push(
-      `상대 반격 상성 +${Math.round((effectiveCombatMatchup(b, a) - 1) * 100)}%`,
-    );
-  if (cityCounter)
-    reasons.push(
-      `도시 수비 반격 ${cityCounterAttack(cityTarget, view)} · 인구 ${cityTarget.population ?? 0}`,
-    );
-  const rawReceived = counter
-    ? (() => {
-        const [low, high] = combatRollRange(b);
-        const scale = counterMultiplier(view);
-        return [
-          Math.max(4, Math.round(unitDamage(b, a, view, low) * scale)),
-          Math.max(4, Math.round(unitDamage(b, a, view, high) * scale)),
-        ];
-      })()
-    : cityCounter
-      ? cityCounterRange(cityTarget, view)
-      : [0, 0];
+  const dealt = protectedTarget ? [0, 0] : rawDealt.map((n) => Math.min(targetHp, n));
+  const rawReceived = [exchangeLow.received, exchangeHigh.received];
   const received = rawReceived.map((n) => Math.min(a.hp, n));
   const targetOutcome = outcome(targetHp, protectedTarget ? [0, 0] : rawDealt);
   const attackerOutcome = outcome(a.hp, rawReceived);
@@ -697,26 +768,25 @@ export function combatPreview(view, a, b) {
     received,
     dealtBounds: rawDealt,
     receivedBounds: rawReceived,
-    attack: combatStrength(a, false, view, b),
-    defense: city
-      ? cityTarget.structure
-        ? cityTarget.maxHp
-        : cityMaxHealth(cityTarget) + cityWallHp(cityTarget)
-      : combatStrength(b, true, view, a),
+    expected: { dealt: exchange.dealt, received: exchange.received },
+    attack: attackStrength,
+    defense: defenseStrength,
+    strengthDifference: Math.round((attackStrength - defenseStrength) * 10) / 10,
+    attackerTerms,
+    defenderTerms,
+    melee: exchange.melee,
     targetOutcome,
     attackerOutcome,
     ammunition,
     wallProtected: structureProtected,
     garrisonProtected: cityProtected,
-    // Aliases keep the contract readable for both the board and compact
-    // panel without making either client infer lethal risk from bounds.
     kill: targetOutcome,
     outcome: { target: targetOutcome, attacker: attackerOutcome },
     uncertainty: city
       ? cityProtected
-        ? "현재 보이는 도시 성벽·몸체 상태 기준 · 주둔군은 도시 파괴 전까지 보호 · 피해 무작위 ±12%"
-        : "현재 보이는 성벽·도시 상태 기준 · 피해 무작위 ±12%"
-      : "피해 무작위 ±12% · 현재 보이는 상태 기준",
+        ? "문명6 공식 · 30·e^(전투력 차/25) · 무작위 75~125% · 주둔군은 도시 파괴 전까지 보호"
+        : "문명6 공식 · 30·e^(전투력 차/25) · 무작위 75~125% · 현재 보이는 성벽·도시 상태 기준"
+      : "문명6 공식 · 30·e^(전투력 차/25) · 무작위 75~125% · 현재 보이는 상태 기준",
   };
   if (city) {
     result.capture = cityCapturePreview(
@@ -725,12 +795,8 @@ export function combatPreview(view, a, b) {
       rawDealt,
       { legal, garrisonProtected: cityProtected },
     );
-    result.wallDamage = rawDealt.map((n) =>
-      Math.min(cityWallHp(cityTarget), n),
-    );
-    result.bodyDamage = rawDealt.map((n) =>
-      Math.min(cityTarget.hp, Math.max(0, n - cityWallHp(cityTarget))),
-    );
+    result.wallDamage = [exchangeLow.wallDamage, exchangeHigh.wallDamage];
+    result.bodyDamage = [exchangeLow.bodyDamage, exchangeHigh.bodyDamage];
     result.cityPool = {
       id: cityTarget.id ?? null,
       hp: cityTarget.hp,

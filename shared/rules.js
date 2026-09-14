@@ -387,7 +387,8 @@ export const level = (xp) =>
 export const unitStat = (unit, name, fallback) => unit?.experimentStats?.[name] ?? fallback;
 export const unitMovement = (unit) => unitStat(unit, "movement", TYPES[unit.type].movement);
 export const unitAttacks = (unit) => unitStat(unit, "attacks", 1);
-export const maxHealth = (unit) => unitStat(unit, "maxHealth", 100) * unit.size;
+// Civ6 formations: a corps/army keeps 100 HP and gains combat strength instead.
+export const maxHealth = (unit) => unitStat(unit, "maxHealth", 100);
 export const growthTarget = (population) => 12 + population * 4;
 export const growthHalfTarget = (population) => growthTarget(population) / 2;
 export const landPrice = (tile, city) =>

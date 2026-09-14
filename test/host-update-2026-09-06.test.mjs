@@ -20,7 +20,7 @@ import {
   equal,
   key,
 } from "../shared/rules.js";
-import { combatPreview, cityCounterRange, hexLine } from "../shared/combat.js";
+import { combatPreview, cityCounterRange, cityStrikeDamage, hexLine } from "../shared/combat.js";
 
 // Host-requested rule update of 2026-09-06: flat map, 4/10 movement, city
 // return fire, prepaid niter, adjacent production spawn, host balance
@@ -80,15 +80,16 @@ test("city return fire scales with population and honours host balance values", 
   const attacker = addUnit(g, "p1", "spearman", { q: 5, r: 4 });
   assert.equal(cityCounterAttack(city, g), BALANCE_DEFAULTS.cityBaseAttack + 4 * BALANCE_DEFAULTS.cityAttackPerPop);
   const preview = combatPreview(observe(g, "p1"), attacker, { ...city, hostile: true });
-  assert.deepEqual(preview.received, cityCounterRange(city, g).map((n) => Math.min(attacker.hp, n)));
-  assert.ok(preview.reasons.some((r) => r.includes("도시 수비 반격")));
+  assert.deepEqual(preview.received, cityCounterRange(city, g, attacker).map((n) => Math.min(attacker.hp, n)));
+  assert.ok(preview.reasons.some((r) => r.includes("도시 반격")));
   const before = attacker.hp;
+  const expectedReturn = cityStrikeDamage(g, city, attacker, 1); // computed before the attacker is wounded
   submitOrders(g, "p1", {
     turn: 1,
     orders: [{ unitId: attacker.id, action: "attack", target: { q: city.q, r: city.r } }],
   });
   assert.ok(city.hp < 160, "the city still takes the attack");
-  assert.equal(before - attacker.hp, Math.round((20 + 12) * 1.0), "return fire at the deterministic mid roll");
+  assert.equal(before - attacker.hp, expectedReturn, "return fire at the deterministic mid roll (Civ6 formula, city CS 32 vs 21)");
   // Artillery keeps its stand-off immunity.
   const gun = addUnit(g, "p1", "artillery", { q: 4, r: 4 });
   const gunHp = gun.hp;
@@ -133,7 +134,7 @@ test("balance changes in a duel require a pause; melee counter uses the multipli
   const b = addUnit(g, "p2", "spearman", { q: 6, r: 5 });
   const view = observe(g, "p1");
   const preview = combatPreview(view, a, view.units.find((u) => u.id === b.id));
-  assert.deepEqual(preview.received, [4, 4], "floor of four when the host zeroes the counter");
+  assert.deepEqual(preview.received, [0, 0], "no return fire when the host zeroes the counter multiplier");
 });
 
 test("prepaid niter: a powder unit pays at its own turn start and can still fire at zero stock", () => {

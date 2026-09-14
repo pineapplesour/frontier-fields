@@ -137,18 +137,17 @@ test("runtime restart preserves experiment overrides, remaining actions and reso
   assert.equal(v.experimentStats.defense, undefined); assert.equal(v.attacksLeft, 4);
 });
 
-test("joint attack counts distinct adjacent military positions and matches public preview", () => {
+test("flanking counts distinct adjacent military positions (Civ6 +2 CS each) and matches public preview", () => {
   const g = fixture(); const a = addUnit(g, "p1", "spearman", { q: 5, r: 5 });
   const b = addUnit(g, "p2", "spearman", { q: 6, r: 5 });
   const before = unitDamage(a, b, g);
   addUnit(g, "p1", "builder", { q: 6, r: 4 });
-  assert.equal(jointAttackPenalty(g, b, a).penalty, 0);
+  assert.equal(jointAttackPenalty(g, b, a).count, 1, "civilians never flank");
+  assert.equal(unitDamage(a, b, g), before);
   addUnit(g, "p1", "spearman", { q: 6, r: 4 });
-  assert.equal(jointAttackPenalty(g, b, a).penalty, 0.1);
+  assert.equal(jointAttackPenalty(g, b, a).count, 2);
   assert.ok(unitDamage(a, b, g) > before);
   const view = observe(g, "p1");
   const preview = combatPreview(view, view.units.find(u => u.id === a.id), view.units.find(u => u.id === b.id));
-  assert.ok(preview.reasons.some(reason => reason.includes("합동공격")));
-  edit(g, b, "unit", { jointPenalty: 0 });
-  assert.equal(unitDamage(a, b, g), before);
+  assert.ok(preview.reasons.some(reason => reason.includes("측면 1부대 +2")));
 });

@@ -449,8 +449,9 @@ test("formations merge only equal tiers with literal summed health and retained 
   order(g, "p1", a.id, "merge", { targetId: b.id });
   resolveTurn(g, 2_000);
   assert.equal(b.size, 2);
-  assert.equal(b.hp, 134);
-  assert.equal(maxHealth(b), 200);
+  // Civ6: HP is not pooled; the brigade keeps the healthier constituent's HP.
+  assert.equal(b.hp, 73);
+  assert.equal(maxHealth(b), 100);
   assert.equal(b.formation.tier, "brigade");
   assert.deepEqual(b.formation.sourceNames, ["둘째 부대", "첫 부대"]);
   assert.equal(b.formation.manpower, 2);
@@ -470,19 +471,20 @@ test("formations merge only equal tiers with literal summed health and retained 
   order(g, "p1", b.id, "merge", { targetId: c.id });
   resolveTurn(g, 2_000);
   assert.equal(c.size, 4);
-  assert.equal(c.hp, 314);
-  assert.equal(maxHealth(c), 400);
+  assert.equal(c.hp, 100);
+  assert.equal(maxHealth(c), 100);
   assert.equal(c.formation.tier, "division");
   assert.equal(c.formation.manpower, 4);
 
-  const legacy = addUnit(g, "p1", "cavalry", { q: 7, r: 3 }, { size: 3, hp: 201, xp: 12 });
+  const legacy = addUnit(g, "p1", "cavalry", { q: 7, r: 3 }, { size: 3, xp: 12 });
+  legacy.hp = 201; // raw pooled-HP save state (100 × size model)
   delete legacy.formation;
   const snapshot = JSON.parse(JSON.stringify(g));
   const observed = observe(restoreGame(snapshot), "p1").units.find(
     (u) => u.id === legacy.id,
   );
   assert.equal(observed.size, 3);
-  assert.equal(observed.hp, 201);
+  assert.equal(observed.hp, 67, "pooled legacy HP 201/300 migrates to 67/100");
   assert.equal(observed.formation.tier, "legacy");
   assert.equal(observed.formation.manpower, 3);
   assert.ok(snapshot.units.some((u) => u.id === legacy.id));
@@ -534,7 +536,7 @@ test("recovery is 16 per base unit, walls absorb first and repair never passivel
   });
   resolveTurn(g, 2_000);
   assert.ok(city.wallHp > 10);
-  assert.equal(city.hp, 116);
+  assert.equal(city.hp, 120, "Civ6 city heal 20 per quiet turn");
   const bodyAfterRepair = city.hp;
   city.lastIncomingAttackTurn = g.turn;
   city.wallRepairStartedTurn = g.turn - 1;
@@ -655,16 +657,16 @@ test("direct military overrun captures builders, while final city capture preser
 
 test("preview exposes position modifiers and mathematically bounded lethal/death risk, and joint-war deal commits both sides atomically", () => {
   const g = field();
-  // Attack strength is linear in HP, so a 1-HP defender's counter is the
-  // 6-damage floor; a 6-HP attacker keeps the death risk "possible".
+  // Civ6: a 1-HP defender still hits back with ~11 CS, so a 6-HP attacker keeps
+  // the death risk "possible" while its own kill is guaranteed.
   const attacker = addUnit(g, "p1", "spearman", { q: 3, r: 3 }, { hp: 6 });
   const target = addUnit(g, "p2", "spearman", { q: 4, r: 3 }, { hp: 1 });
-  g.tiles.find((t) => equal(t, attacker)).terrain = "hills";
+  g.tiles.find((t) => equal(t, target)).terrain = "hills";
   const preview = combatPreview(observe(g, "p1"), attacker, {
     ...target,
     hostile: true,
   });
-  assert.ok(preview.reasons.includes("구릉지 고지 공격 +10%"));
+  assert.ok(preview.reasons.includes("방어 구릉지 방어 +3"));
   assert.equal(preview.targetOutcome.possible, true);
   assert.equal(preview.targetOutcome.guaranteed, true);
   assert.equal(preview.outcome.attacker.possible, true);

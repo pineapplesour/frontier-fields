@@ -26,14 +26,14 @@ test("ranged combat keeps its real distance instead of inventing a melee counter
     assert.deepEqual(p.received,[0,0]);assert.equal(p.approachFrom,undefined);
   }
 });
-test("attack scales linearly with remaining HP (half health → −50%, 10% → −90%) and preview names the injury penalty",()=>{
+test("Civ6 wounds: combat strength drops linearly to −10 CS at 0 HP and the preview names the penalty",()=>{
   const g=field(),a=addUnit(g,"p1","cavalry",{q:5,r:5}),b=addUnit(g,"p2","spearman",{q:6,r:5});
   const full=combatStrength(a,false,g,b);a.hp=50;
-  assert.equal(combatStrength(a,false,g,b),full*0.5);
-  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격력 −50%")));
+  assert.equal(combatStrength(a,false,g,b),full-5);
+  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격 부상 -5")));
   a.hp=10;
-  assert.ok(Math.abs(combatStrength(a,false,g,b)-full*0.1)<1e-9);
-  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격력 −90%")));
+  assert.equal(combatStrength(a,false,g,b),full-9);
+  assert.ok(combatPreview(g,a,b).reasons.some(r=>r.includes("공격 부상 -9")));
 });
 test("founding a city on hills consumes the settler without flattening the tile",()=>{
   const g=field(),s=addUnit(g,"p1","settler",{q:5,r:5});

@@ -110,31 +110,22 @@ function fireOnGarrison({ size = 1, xp = 0 } = {}) {
   };
 }
 
-test("city fire damage is independent of garrison size and XP", () => {
+test("city fire on a garrisoned city hits the city pool; a stronger garrison raises the city's Civ6 defense", () => {
   const base = fireOnGarrison({ size: 1, xp: 0 });
   const veteranFormation = fireOnGarrison({ size: 4, xp: 62 });
-  assert.deepEqual(
-    {
-      cityHp: veteranFormation.cityHp,
-      cityWallHp: veteranFormation.cityWallHp,
-      cityLoss: veteranFormation.cityLoss,
-    },
-    {
-      cityHp: base.cityHp,
-      cityWallHp: base.cityWallHp,
-      cityLoss: base.cityLoss,
-    },
-    "city-fire strength must use the city pool, not the selected garrison's strength",
-  );
+  assert.equal(base.cityWallHp, veteranFormation.cityWallHp);
+  assert.ok(base.cityLoss > 0);
+  // Civ6 city CS = max(own, garrison CS): a division of veterans defends better.
+  assert.ok(veteranFormation.cityLoss <= base.cityLoss);
   assert.equal(base.garrisonHp, 100);
-  assert.equal(veteranFormation.garrisonHp, 400);
+  assert.equal(veteranFormation.garrisonHp, 100, "Civ6 formations keep 100 HP and are shielded by the city");
 });
 
 test("zero-wall city fire damages the city body while shielding its garrison", () => {
   const result = fireOnGarrison({ size: 2, xp: 62 });
   assert.equal(result.cityWallHp, 0);
   assert.ok(result.cityHp < 160, "wallless city body must still take city-fire damage");
-  assert.equal(result.garrisonHp, 200, "standing city body protects the garrison");
+  assert.equal(result.garrisonHp, 100, "standing city body protects the garrison");
 });
 
 test("NPC artillery orders do not home to an unseen target", () => {

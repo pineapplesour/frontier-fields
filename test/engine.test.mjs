@@ -296,7 +296,8 @@ test("equal brigades merge into a four-unit division conserving damaged health a
     command(g, a, "merge", { targetId: b.id });
     resolveTurn(g);
     assert.equal(b.size, 4);
-    assert.equal(b.hp, 205);
+    // Civ6: HP is not pooled — the division keeps the healthier HP, capped at 100.
+    assert.equal(b.hp, 100);
     assert.equal(b.xp, 5);
     assert.equal(g.units.length, 1);
     const c = addUnit(g, "p1", "spearman", { q: 3, r: 2 });
@@ -311,7 +312,7 @@ test("fortification consumes a stationary turn and moving cancels it", () => {
   assert.equal(u.fortified, false);
   resolveTurn(g);
   assert.equal(u.fortified, true);
-  assert.equal(strength(u, true, g), base * 1.25);
+  assert.equal(strength(u, true, g), base + 6, "Civ6 fortification: +6 CS");
   command(g, u, "move", { target: { q: 4, r: 2 } });
   resolveTurn(g);
   assert.equal(u.fortified, false);
@@ -346,12 +347,14 @@ test("counter relationships and hill defense match the stated rules", () => {
   const g = field(),
     s = addUnit(g, "p1", "spearman", { q: 3, r: 2 }),
     c = addUnit(g, "p2", "cavalry", { q: 4, r: 2 });
-  assert.equal(matchup(s, c), 2);
-  assert.equal(matchup(c, { ...s, type: "musketeer" }), 2);
-  assert.equal(matchup(s, { ...c, type: "artillery" }), 2);
+  // Civ6: anti-cavalry +10 CS vs cavalry (≈1.49× damage); no other type bonuses.
+  assert.equal(matchup(s, c), 1.4, "+10 CS expressed as the legacy ratio 1 + 10/25");
+  assert.equal(matchup(c, s), 1, "cavalry's +5 vs anti-cavalry is the smaller side of the pair");
+  assert.equal(matchup(c, { ...s, type: "musketeer" }), 1);
+  assert.equal(matchup(s, { ...c, type: "artillery" }), 1);
   const before = strength(s, true, g);
   tile(g, s).terrain = "hills";
-  assert.equal(strength(s, true, g), before * 1.2);
+  assert.equal(strength(s, true, g), before + 3, "Civ6 hills defense: +3 CS");
 });
 test("river crossing has two subsequent turns of penalty then expires", () => {
   const g = field(),

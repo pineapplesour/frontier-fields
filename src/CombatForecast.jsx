@@ -23,19 +23,20 @@ export function CombatForecast({ forecast }) {
         <span>
           아군 예상 피해
           <strong>
-            {preview.approachUnavailable ? "접근 경로 확인 필요" : `−${combatOutcome?.received ?? rangeText(preview.received ?? preview.counterDamageRange ?? preview.ownDamageRange) ?? "공개 범위 없음"}`}
+            {preview.approachUnavailable ? "접근 경로 확인 필요" : `−${combatOutcome?.received ?? rangeText(preview.received ?? preview.counterDamageRange ?? preview.ownDamageRange) ?? "공개 범위 없음"}${Number.isFinite(preview.expected?.received) && preview.melee ? ` (평균 ${Math.min(preview.expected.received, unit.hp)})` : ""}`}
           </strong>
         </span>
         <span>
           상대 예상 피해
           <strong>
-            {preview.approachUnavailable ? "접근 경로 확인 필요" : `−${combatOutcome?.damage ?? rangeText(preview.dealt ?? preview.damageRange ?? preview.enemyDamageRange) ?? "공개 범위 없음"}`}
+            {preview.approachUnavailable ? "접근 경로 확인 필요" : `−${combatOutcome?.damage ?? rangeText(preview.dealt ?? preview.damageRange ?? preview.enemyDamageRange) ?? "공개 범위 없음"}${Number.isFinite(preview.expected?.dealt) ? ` (평균 ${preview.expected.dealt})` : ""}`}
           </strong>
         </span>
       </div>
       <p>
-        유효 공격 {Number.isFinite(Number(preview.attack)) ? Number(preview.attack).toFixed(1) : "공개 범위 없음"} · 방어{" "}
+        전투력 {Number.isFinite(Number(preview.attack)) ? Number(preview.attack).toFixed(1) : "공개 범위 없음"} 대{" "}
         {Number.isFinite(Number(preview.defense)) ? Number(preview.defense).toFixed(1) : "공개 범위 없음"}
+        {Number.isFinite(Number(preview.strengthDifference)) ? ` (차이 ${preview.strengthDifference > 0 ? "+" : ""}${preview.strengthDifference})` : ""}
       </p>
       {combatOutcome?.enemy ? (
         <p className={`combat-outcome ${combatOutcome.enemyTone}`}>

@@ -4,6 +4,7 @@ import {createGame,addUnit,submitOrders,observe,transact,resolveTurn} from "../s
 import {damageTotal} from "../src/combatPresentation.js";
 import {buildWorld,terrainHeight,disposeGroup} from "../src/world3d.js";
 import {equal} from "../shared/rules.js";
+import {cityCounterRange} from "../shared/combat.js";
 
 function fixture(cities = false) {
   const g=createGame({mode:"practice",experiment:true});g.units=[];g.rivers=[];g.wars=["p1|p2"];
@@ -42,8 +43,10 @@ test("second reserved attacker preserves its opportunity after first captures th
 test("city active bombard inflicts twice the former deterministic damage",()=>{
   const g=fixture(true);const c=g.cities.find(c=>c.owner==="p1");Object.assign(c,{q:5,r:5,hp:160,wallLevel:1,wallHp:50});
   const d=addUnit(g,"p2","spearman",{q:6,r:5});
+  const [low,high]=cityCounterRange(c,g,d);
   submitOrders(g,"p1",{turn:g.turn,orders:[{cityId:c.id,action:"cityBombard",target:{q:d.q,r:d.r}}]});
-  assert.equal(d.hp,78);
+  // Civ6 city ranged strike: city CS vs the target's CS, roll 75~125%.
+  assert.ok(100-d.hp>=low&&100-d.hp<=high,`${100-d.hp} in [${low},${high}]`);
 });
 test("garrison actor stays on the tile ground; label stacking must not lift the model",()=>{
   const g=fixture(true);const city=g.cities.find(c=>c.owner==="p1");const u=addUnit(g,"p1","spearman",city);

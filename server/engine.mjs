@@ -90,6 +90,13 @@ import {
   combatRollRange,
   hasLineOfSight,
   cityCounterDamage,
+  unitExchange,
+  cityExchange,
+  cityStrikeDamage,
+  cityStrength,
+  civDamage,
+  rollFromRandom,
+  CIV6,
   formationTier,
   formationTierName,
   preventMutualDeath,
@@ -214,12 +221,18 @@ export function relation(g, a, b) {
 }
 const coordinate = (p) => p && Number.isInteger(p.q) && Number.isInteger(p.r);
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-function normalizeFormation(u) {
+function normalizeFormation(u, { migratePooledHp = false } = {}) {
   u.size = Number.isInteger(u.size) && u.size > 0 ? u.size : 1;
   u.xp = Number.isFinite(u.xp) && u.xp >= 0 ? u.xp : 0;
   const current = u.formation;
+  // Pre-Civ6 saves pooled HP (100 × size). Convert once, proportionally.
+  const pooledModel = migratePooledHp && (!current || typeof current !== "object" || current.hpModel !== "civ6");
+  if (pooledModel && u.size > 1 && Number.isFinite(u.hp) && u.hp > 0) {
+    u.hp = Math.max(1, Math.min(maxHealth(u), Math.round(u.hp / u.size)));
+  } else if (Number.isFinite(u.hp) && u.hp > maxHealth(u)) u.hp = maxHealth(u);
   if (!current || typeof current !== "object" || Array.isArray(current)) {
     u.formation = {
+      hpModel: "civ6",
       tier: formationTier(u.size),
       sourceIds: [u.id],
       sourceNames: u.name ? [u.name] : [],
@@ -248,11 +261,13 @@ function normalizeFormation(u) {
   // battalion (1) / brigade (2) / division (4).
   if (current.tier === "base" || current.tier === "corps" || current.tier == null)
     current.tier = formationTier(u.size);
+  current.hpModel = "civ6";
   return current;
 }
 function mergeFormation(receiver, donor, size) {
   const a = normalizeFormation(receiver), b = normalizeFormation(donor);
   return {
+    hpModel: "civ6",
     tier: formationTier(size),
     sourceIds: [...a.sourceIds, ...b.sourceIds],
     sourceNames: [...a.sourceNames, ...b.sourceNames],
@@ -300,7 +315,7 @@ function normalizeState(g) {
   ensureLogisticsState(g);
   ensureTileFeatures(g);
   for (const c of g.cities ?? []) normalizeStoredProduction(c);
-  for (const u of g.units ?? []) normalizeFormation(u);
+  for (const u of g.units ?? []) normalizeFormation(u, { migratePooledHp: true });
   for (const c of g.cities ?? []) normalizeCityDefense(c);
   g.tradeNotices ??= {};
   for (const id of Object.keys(FACTIONS)) {
@@ -2708,15 +2723,10 @@ export function submitOrders(
     const targetCity = g.cities.find(
       (city) => city.hp > 0 && equal(city, d) && atWar(g, c.owner, city.owner),
     );
-    const rawLoss = 2 * Math.max(
-      6,
-      Math.round(
-        (((22 + c.wallLevel * 8) * 22) / Math.max(8, targetCity ? 30 + (targetCity.wallLevel ?? 0) * 8 : strength(d, true, g))) *
-          0.4 *
-          (0.85 + g.random() * 0.3) *
-          (1 - siegePenalty(c.isolation)),
-      ),
-    );
+    // Civ6 city ranged strike: city CS vs the target's CS with the shared formula.
+    const rawLoss = targetCity
+      ? civDamage(cityStrength(g, c), cityStrength(g, targetCity), roll(g))
+      : cityStrikeDamage(g, c, d, roll(g));
     if (targetCity) {
       normalizeCityDefense(targetCity);
       // A hit on a wall-less garrison still means the city is under attack.
@@ -2887,9 +2897,9 @@ function seenBy(g, p) {
 export const strength = combatStrength;
 export const crossesRiver = riverBetween;
 export const matchup = combatMatchup;
+const roll = (g) => rollFromRandom(g.random());
 function damage(a, b, g) {
-  const [low, high] = combatRollRange(a);
-  return unitDamage(a, b, g, low + g.random() * (high - low));
+  return unitDamage(a, b, g, roll(g));
 }
 function handleMoves(g, scope = living(g)) {
   const movers = scope
@@ -3179,7 +3189,7 @@ function handleCombat(g, scope = living(g)) {
           (e) => atWar(g, e.owner, u.owner) && equal(e, target),
         ).sort((a, b) => Number(isCivilian(a)) - Number(isCivilian(b)))[0];
     if (fort && (structureHp(fort) > 0 || structureWallHp(fort) > 0) && atWar(g, fort.owner, u.owner)) {
-      const n = cityDamage(u, { q: target.q, r: target.r, wallLevel: 0 }, g);
+      const n = civDamage(combatStrength(u, false, g, { q: target.q, r: target.r }), cityStrength(g, { q: target.q, r: target.r, owner: fort.owner, population: 0, wallLevel: 0, hp: 1 }), roll(g));
       fortHits.set(key(targetTile), (fortHits.get(key(targetTile)) ?? 0) + n);
       if (bombard) {
         g.reveals[u.owner] ??= [];
@@ -3235,7 +3245,9 @@ function handleCombat(g, scope = living(g)) {
         g.reveals[u.owner] ??= [];
         g.reveals[u.owner].push({ q: d.q, r: d.r, unitId: d.id, turn: g.turn });
       }
-      const n = damage(u, d, g);
+      // Same shared exchange the hover forecast uses; only the rolls differ.
+      const exchange = unitExchange(g, u, d, { attackRoll: roll(g), counterRoll: roll(g) });
+      const n = exchange.dealt;
       addHit(d, n);
       addXp(u, COMBAT_XP_PARTICIPATION);
       addXp(d, COMBAT_XP_PARTICIPATION);
@@ -3259,8 +3271,8 @@ function handleCombat(g, scope = living(g)) {
           [u.owner],
           `${label(target)}에 포격했어요. 시야 밖의 피해는 확인할 수 없어요.`,
         );
-      if (distance(u, d) === 1 && military(d) && !bombard) {
-        addHit(u, Math.max(4, Math.round(damage(d, u, g) * counterMultiplier(g))));
+      if (exchange.melee && exchange.received > 0) {
+        addHit(u, exchange.received);
         counters.set(u.id, d);
         underdog.set(`${d.id}|${u.id}`, unfavorableFight(g, d, u, false));
       }
@@ -3271,8 +3283,8 @@ function handleCombat(g, scope = living(g)) {
           g.reveals[u.owner] ??= [];
           g.reveals[u.owner].push({ q: c.q, r: c.r, turn: g.turn });
         }
-        const [low, high] = combatRollRange(u);
-        const n = cityDamage(u, c, g, low + g.random() * (high - low));
+        const cityHit = cityExchange(g, u, c, { attackRoll: roll(g), counterRoll: roll(g) });
+        const n = cityHit.dealt;
         cityHits.set(c.id, (cityHits.get(c.id) ?? 0) + n);
         if (!cityAttackers.has(c.id)) cityAttackers.set(c.id, []);
         cityAttackers.get(c.id).push(u);
@@ -3280,8 +3292,8 @@ function handleCombat(g, scope = living(g)) {
         event(g, [c.owner], `${c.name} 방어 시설에 피해 ${n}.`);
         // A standing city returns fire on an adjacent direct attacker with a
         // population-scaled strength. Artillery keeps its stand-off immunity.
-        if (!bombard && u.type !== "artillery" && distance(u, c) === 1 && cityCounterAttack(c, g) > 0) {
-          const back = Math.min(u.hp, cityCounterDamage(c, g, 0.88 + g.random() * 0.24));
+        if (cityHit.melee) {
+          const back = Math.min(u.hp, cityHit.received);
           if (back > 0) {
             addHit(u, back);
             event(g, [u.owner], `${c.name} 수비대 반격 · ${label(u)} 피해 ${back}.`);
@@ -3593,7 +3605,9 @@ function handleActions(g, scope = living(g), endTurn = false) {
         t.xp = Math.floor((t.xp * t.size + u.xp * u.size) / size);
         t.formation = mergeFormation(t, u, size);
         t.size = size;
-        t.hp += u.hp;
+        // Civ6: a corps/army keeps 100 max HP; the merged unit takes the
+        // healthier constituent's HP and gains combat strength instead.
+        t.hp = Math.min(maxHealth(t), Math.max(t.hp, u.hp));
         t.fortified = false;
         t.isolation = Math.max(t.isolation, u.isolation);
         t.riverTurns = Math.max(t.riverTurns, u.riverTurns);
@@ -3731,7 +3745,7 @@ function handleActions(g, scope = living(g), endTurn = false) {
       u.isolation === 0 &&
       !merging.has(u.id)
     ) {
-      const healed = Math.min(maxHealth(u) - u.hp, 16 * u.size);
+      const healed = Math.min(maxHealth(u) - u.hp, 16);
       u.hp += healed;
       if (healed > 0)
         for (const player of observerIds(g))
@@ -3987,7 +4001,7 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
           // begins. The wall repair cooldown is separate and longer.
           g.turn - c.lastIncomingAttackTurn >= 2)
       ) {
-        const healed = Math.min(16, cityMaxHealth(c) - c.hp);
+        const healed = Math.min(CIV6.CITY_HEAL_PER_TURN, cityMaxHealth(c) - c.hp);
         c.hp += healed;
         if (healed > 0)
           for (const player of observerIds(g))
