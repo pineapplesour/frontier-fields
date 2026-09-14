@@ -98,6 +98,9 @@ function resourceAlternative(g, player, give, shortfall) {
 // only the explicit expansion ruleset (or a future explicit opt-in) does.
 const physicalUnitDeals = (g) =>
   g.rulesVersion === "expansion-v1" || g.logistics?.physical === true;
+// Resources travel as physical shipments (source/destination cities) only when
+// detailed supply is ON; with supply OFF they settle instantly between stockpiles.
+const physicalResourceDeals = (g) => physicalUnitDeals(g) && isSupplyOn(g);
 const cityFor = (g, id, owner = null) => {
   const city = g.cities?.find((candidate) => candidate.id === id);
   return city && (owner == null || city.owner === owner) ? city : null;
@@ -130,10 +133,12 @@ function validatePhysicalSide(g, owner, recipient, side, escrow, fail) {
   }
   for (const [resource, amount] of Object.entries(side.resources ?? {})) {
     if (!amount) continue;
-    const source = cityFor(g, sourceCityId(side), owner);
-    const destination = cityFor(g, resourceDestinationId(side), recipient);
-    if (!source || !destination)
-      fail("자원 거래에는 출발·도착 도시를 모두 지정해 주세요.");
+    if (physicalResourceDeals(g)) {
+      const source = cityFor(g, sourceCityId(side), owner);
+      const destination = cityFor(g, resourceDestinationId(side), recipient);
+      if (!source || !destination)
+        fail("자원 거래에는 출발·도착 도시를 모두 지정해 주세요.");
+    }
     if (!escrow && (g.stockpiles?.[owner]?.[resource] ?? 0) < amount)
       fail("거래 자원이 부족해요.");
   }
@@ -219,7 +224,7 @@ function createPhysicalDealShipments(g, p) {
       );
     }
     for (const [resource, amount] of Object.entries(side.resources ?? {})) {
-      if (!amount) continue;
+      if (!amount || !physicalResourceDeals(g)) continue;
       shipments.push(
         createResourceShipment(g, {
           owner,
@@ -446,7 +451,7 @@ export function handleDeal(
     }
     g.gold[p.to] += p.give.gold - p.receive.gold;
     g.gold[p.from] += p.receive.gold;
-    if (!physical)
+    if (!physicalResourceDeals(g))
       for (const r of Object.keys(RESOURCES)) {
         g.stockpiles[p.to][r] +=
           (p.give.resources[r] ?? 0) - (p.receive.resources[r] ?? 0);
