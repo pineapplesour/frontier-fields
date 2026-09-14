@@ -1271,17 +1271,34 @@ export function visibility(g, player) {
       )
       .map(key),
   );
-  const sources = [
-    ...living(g)
-      .filter((u) => u.owner === player)
-      .map((u) => ({ ...u, vision: TYPES[u.type].vision })),
-    ...g.cities
-      .filter((c) => c.owner === player)
-      .map((c) => ({ ...c, vision: 3 })),
-  ];
-  for (const t of g.tiles)
-    if (sources.some((s) => distance(s, t) <= s.vision)) seen.add(key(t));
+  // Enumerate each source's hex radius against a coordinate index instead of
+  // testing all 400 tiles per source; identical result set, far fewer scans.
+  const index = tileIndex(g);
+  const mark = (s, vision) => {
+    for (let dq = -vision; dq <= vision; dq++) {
+      const low = Math.max(-vision, -dq - vision),
+        high = Math.min(vision, -dq + vision);
+      for (let dr = low; dr <= high; dr++) {
+        const k = `${s.q + dq},${s.r + dr}`;
+        if (index.has(k)) seen.add(k);
+      }
+    }
+  };
+  for (const u of g.units)
+    if (u.hp > 0 && u.owner === player) mark(u, TYPES[u.type].vision);
+  for (const c of g.cities) if (c.owner === player) mark(c, 3);
   return seen;
+}
+// Coordinate lookup for the (fixed) tile array. Rebuilt only when the tile
+// array itself is replaced (new game, restore, synthetic tests).
+const tileIndexCache = new WeakMap();
+function tileIndex(g) {
+  let index = tileIndexCache.get(g.tiles);
+  if (!index || index.size !== g.tiles.length) {
+    index = new Map(g.tiles.map((t) => [key(t), t]));
+    tileIndexCache.set(g.tiles, index);
+  }
+  return index;
 }
 export function farmYield(g, t, previewOwner = t.owner) {
   const terrainYield = farmTerrainYield(t);
@@ -1747,6 +1764,8 @@ export function updateContacts(g) {
   g.contacts ??= { p1: {}, p2: {} };
   g.explored ??= {};
   g.cityContacts ??= {};
+  const cityById = new Map(g.cities.map((c) => [c.id, c]));
+  const alive = living(g);
   for (const player of Object.keys(g.players)) {
     g.contacts[player] ??= {};
     g.explored[player] ??= {};
@@ -1755,7 +1774,7 @@ export function updateContacts(g) {
       known = g.contacts[player];
     for (const t of g.tiles)
       if (seen.has(key(t)) || t.owner === player) {
-        const c = g.cities.find((c) => c.id === t.cityId);
+        const c = t.cityId ? cityById.get(t.cityId) : undefined;
         g.explored[player][key(t)] = {
           q: t.q,
           r: t.r,
@@ -1798,10 +1817,10 @@ export function updateContacts(g) {
     for (const c of Object.values(known))
       if (
         seen.has(key(c)) &&
-        !living(g).some((u) => u.id === c.id && equal(u, c))
+        !alive.some((u) => u.id === c.id && equal(u, c))
       )
         delete known[c.id];
-    for (const u of living(g))
+    for (const u of alive)
       if (u.owner !== player && seen.has(key(u)))
         known[u.id] = {
           id: u.id,
@@ -1815,7 +1834,7 @@ export function updateContacts(g) {
     updateTerritorialPresence(g, player, {
       playerId: player, turn: g.turn,
       tiles: g.tiles.filter(t => t.owner === player || seen.has(key(t))).map(t => ({ ...t, visible: true, explored: true })),
-      units: living(g).filter(u => u.owner === player || seen.has(key(u))),
+      units: alive.filter(u => u.owner === player || seen.has(key(u))),
       cities: g.cities.filter(c => c.owner === player || seen.has(key(c))),
     });
   }
@@ -4470,7 +4489,18 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
   const savedActivePlayer = g.activePlayer;
   g.deadline = null;
   g.internalNpc = true;
+  // Per-faction observation cache for one NPC pass: the same public view is
+  // reused until a transaction/order (which bumps the revision) or a state
+  // reset changes the world.  Every `attempt` invalidates it unconditionally
+  // because a rejected order may still have touched state.
+  let cached = null;
+  const view = (p) => {
+    if (!cached || cached.player !== p || cached.revision !== g.revision || cached.turn !== g.turn)
+      cached = { player: p, revision: g.revision, turn: g.turn, value: observe(g, p, now) };
+    return cached.value;
+  };
   const attempt = (fn) => {
+    cached = null;
     try {
       fn();
       return true;
@@ -4479,6 +4509,7 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
       return false;
     }
   };
+  const idle = realtime ? npcIdleState(g) : null;
   try {
     const npcIds = (selected ?? [...npcSeatIds(g.players), "cs", "barb"]).filter(
       (p, i, all) => g.players[p] && !g.players[p].eliminated && all.indexOf(p) === i,
@@ -4504,34 +4535,43 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
       for (const c of g.cities.filter((c) => c.owner === p))
         c.attackUsed = false;
       prepayAmmunition(g, p);
+      cached = null;
       }
+      // Realtime: a faction whose previous 1-second step found nothing to do
+      // while the world has not changed since (same turn and revision) would
+      // reach exactly the same decisions; skip its rescan.
+      if (
+        realtime &&
+        idle[p] &&
+        idle[p].turn === g.turn &&
+        idle[p].revision === g.revision
+      )
+        continue;
+      const startRevision = g.revision;
+      let deferred = false;
       if (!settleOnly) {
-      let view = observe(g, p, now);
-      const guaranteeDecision = npcGuaranteeDecision(view);
+      const guaranteeDecision = npcGuaranteeDecision(view(p));
       if (guaranteeDecision)
         attempt(() =>
           transact(g, p, { turn: g.turn, ...guaranteeDecision }, now),
         );
-      view = observe(g, p, now);
-      const diplomacy = npcDiplomacy(view);
+      const diplomacy = npcDiplomacy(view(p));
       if (diplomacy)
         attempt(() => transact(g, p, { turn: g.turn, ...diplomacy }, now));
-      view = observe(g, p, now);
       g.npcEconomyTurns ??= {};
       if (!realtime || g.npcEconomyTurns[p] !== g.turn) {
       g.npcEconomyTurns[p] = g.turn;
-      for (const prod of npcEconomy(view))
+      for (const prod of npcEconomy(view(p)))
         attempt(() =>
           prod.transaction
             ? transact(g, p, { turn: g.turn, ...prod.transaction }, now)
             : submitOrders(g, p, { turn: g.turn, ...prod }, now),
         );
       }
-      view = observe(g, p, now);
-      for (const c of view.cities.filter(
+      for (const c of view(p).cities.filter(
         (c) => c.owner === p && c.hp > 0 && c.wallHp > 0 && !c.attackUsed,
       )) {
-        const target = observe(g, p, now)
+        const target = view(p)
           .units.filter((u) => u.hostile && distance(u, c) <= 2 && !mountainBlocksLine(g, c, u))
           .sort((a, b) => a.hp - b.hp || (a.type === "artillery" ? -1 : 1))[0];
         if (target)
@@ -4553,10 +4593,13 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
             ),
           );
       }
-      for (const id of npcTurnOrder(observe(g, p, now)))
+      for (const id of npcTurnOrder(view(p)))
         for (let step = 0; step < (realtime ? 1 : 2); step++) {
-          let order = npcUnitOrder(observe(g, p, now), id);
-          if (realtime && order?.action === "fortify" && savedDeadline - now > 2000) break;
+          let order = npcUnitOrder(view(p), id);
+          if (realtime && order?.action === "fortify" && savedDeadline - now > 2000) {
+            deferred = true;
+            break;
+          }
           if (realtime && order?.action === "move") {
             const next = order.path?.[0];
             if (!next) break;
@@ -4571,6 +4614,11 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
             break;
         }
       }
+      if (realtime)
+        idle[p] =
+          g.revision === startRevision && !deferred
+            ? { turn: g.turn, revision: g.revision }
+            : null;
       if (!realtime) {
       handleActions(
         g,
@@ -4600,6 +4648,14 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
     g.deadline = savedDeadline;
     g.activePlayer = savedActivePlayer;
   }
+}
+// Non-persistent per-match record of realtime NPC factions that had nothing
+// to do at a given (turn, revision); rebuilt after a restart or restore.
+const npcIdleCache = new WeakMap();
+function npcIdleState(g) {
+  let state = npcIdleCache.get(g);
+  if (!state) npcIdleCache.set(g, (state = {}));
+  return state;
 }
 function expireProposals(g) {
   expireTerritorialUltimatums(g, { event });

@@ -307,10 +307,15 @@ export const Board = memo(function Board(props) {
     let frame = 0,
       lastFrame = 0;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+    // Full 30 fps only while something moves or the user is interacting
+    // (rt.render() marks the scene "hot" for a moment); otherwise idle at
+    // ~4 fps so the main thread stays free for input and React updates.
     const draw = (time) => {
       frame = 0;
       if (document.hidden) return;
-      if (time - lastFrame > 32) {
+      const hot = (rt.motion?.active ?? false) || time < (rt.hotUntil ?? 0);
+      const interval = hot ? 32 : 250;
+      if (time - lastFrame > interval) {
         lastFrame = time;
         const motion = rt.motion?.update(
           reduced.matches ? rt.motion.endTime + 1 : time,
@@ -327,6 +332,7 @@ export const Board = memo(function Board(props) {
       if (!reduced.matches) frame = requestAnimationFrame(draw);
     };
     rt.render = () => {
+      rt.hotUntil = performance.now() + 900;
       if (!frame) frame = requestAnimationFrame(draw);
     };
     const visible = () => rt.render();
@@ -598,7 +604,10 @@ export const Board = memo(function Board(props) {
     rt.scene.add(rt.world);
     rt.renderer.shadowMap.needsUpdate = true;
     rt.render();
-  }, [game]);
+    // Rebuild the instanced world only when the server state actually changed
+    // (revision), not on every poll/clock refresh of the same observation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.revision, game.playerId, matchId]);
   useEffect(() => {
     const rt = runtime.current;
     if (!rt) return;
@@ -690,7 +699,8 @@ export const Board = memo(function Board(props) {
     rt.route = result.group;
     rt.scene.add(rt.route);
     rt.render();
-  }, [game, unit, routePath]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.revision, unit?.id, unit?.q, unit?.r, unit?.movesLeft, routePath]);
   useEffect(() => {
     const rt = runtime.current;
     if (!rt) return;
@@ -698,7 +708,8 @@ export const Board = memo(function Board(props) {
     rt.highlight = buildHighlights(game, selected, unit, mode, hover);
     rt.scene.add(rt.highlight);
     rt.render();
-  }, [game, selected, unit, mode, hover]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.revision, selected?.kind, selected?.id, selected?.q, selected?.r, unit?.id, unit?.q, unit?.r, unit?.movesLeft, unit?.attackUsed, mode, hover]);
   useEffect(() => {
     const rt = runtime.current;
     if (rt) {
