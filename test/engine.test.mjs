@@ -521,3 +521,16 @@ test("restored saves without maxTurns are unlimited", () => {
   const r = restoreGame(snap);
   assert.equal(r.maxTurns, null);
 });
+
+test("legacy 40-turn finished match restores as limit-finished and can be reopened", () => {
+  const g = createGame({ mode: "duel", rulesVersion: "expansion-v1" }, 1);
+  const snap = JSON.parse(JSON.stringify(g));
+  snap.phase = "finished"; snap.winner = "p2"; snap.turn = 41; delete snap.maxTurns; delete snap.finishedBy;
+  const r = restoreGame(snap, 1);
+  assert.equal(r.finishedBy, "turnLimit");
+  assert.equal(r.maxTurns, MAX_TURNS);
+  setSettings(r, "p1", { maxTurns: null }, 2);
+  assert.equal(r.phase, "planning");
+  assert.equal(r.winner, null);
+  assert.equal(r.maxTurns, null);
+});

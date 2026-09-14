@@ -50,6 +50,7 @@ import {
   NITER_UPKEEP_PER_UNIT,
   EXPANSION_START_NITER,
   farmTerrainYield,
+  MAX_TURNS,
 } from "../shared/rules.js";
 import { FORT_HP, fortIssue, structureAt, structureHp, structureWallHp, structureMaxHp, structureKind } from "../shared/structures.js";
 import { encampmentIssue, encampmentCandidates, placeEncampment, recordStructureHit, captureStructure, repairStructure, wallRepairEligibility, beginWallRepair, repairWalls } from "./militaryStructures.mjs";
@@ -1056,6 +1057,12 @@ export function restoreGame(snapshot, now = Date.now()) {
     g.randomState = state;
   });
   g.maxTurns = Number.isInteger(g.maxTurns) ? g.maxTurns : null;
+  // Legacy: matches finished under the old fixed 40-turn limit (no finishedBy)
+  // are treated as limit-finished so the host can reopen them.
+  if (g.phase === "finished" && !g.finishedBy && g.maxTurns === null && g.turn > MAX_TURNS) {
+    g.finishedBy = "turnLimit";
+    g.maxTurns = MAX_TURNS;
+  }
   normalizeUnitManpower(g);
   ensureEconomyState(g);
   g.factions ??= factionsFor([
@@ -1996,6 +2003,12 @@ export function restoreRuntimeGame(
     g.randomState = state;
   });
   g.maxTurns = Number.isInteger(g.maxTurns) ? g.maxTurns : null;
+  // Legacy: matches finished under the old fixed 40-turn limit (no finishedBy)
+  // are treated as limit-finished so the host can reopen them.
+  if (g.phase === "finished" && !g.finishedBy && g.maxTurns === null && g.turn > MAX_TURNS) {
+    g.finishedBy = "turnLimit";
+    g.maxTurns = MAX_TURNS;
+  }
   normalizeUnitManpower(g);
   ensureEconomyState(g);
   g.factions ??= factionsFor([
