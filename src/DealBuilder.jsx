@@ -71,8 +71,17 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
   });
   const currentQuote = quote?.key === termsKey ? quote : null;
   const foodBlocked = !detailedSupply && (give.food > 0 || receive.food > 0);
+  const sideEmpty = (s) =>
+    !s.gold &&
+    !(s.food > 0) &&
+    !Object.values(s.resources ?? {}).some(Boolean) &&
+    !(s.units ?? []).length &&
+    !(s.cities ?? []).length &&
+    !s.warAgainst &&
+    !s.openBorders;
+  const emptyDeal = !alliance && !peace && sideEmpty(give) && sideEmpty(receive);
   useEffect(() => {
-    if (disabled || foodBlocked) {
+    if (disabled || foodBlocked || emptyDeal) {
       setQuote(null);
       return undefined;
     }
@@ -97,7 +106,7 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [disabled, foodBlocked, onPreview, termsKey]);
+  }, [disabled, foodBlocked, emptyDeal, onPreview, termsKey]);
   const labels = Object.fromEntries(
     [...game.units, ...game.cities].map((e) => [
       e.id,
