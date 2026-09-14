@@ -582,7 +582,7 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
         <button
           className={`alliance-term ${peace ? "chosen" : ""}`}
           aria-pressed={peace}
-          disabled={disabled}
+          disabled={disabled || (!peace && (faction.peaceLockedUntil ?? 0) > game.turn)}
           onClick={() => {
             setPeace(!peace);
             setReview(false);
@@ -590,13 +590,13 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
         >
           <Icon name="flag" size={18} />
           <span>
-            평화 협정<small>전쟁 종료 · 5턴 재선포 금지</small>
+            평화 협정<small>{(faction.peaceLockedUntil ?? 0) > game.turn ? `개전 후 평화 금지 · ${faction.peaceLockedUntil - game.turn}턴 남음` : "전쟁 종료 · 5턴 재선포 금지"}</small>
           </span>
           <Icon name={peace ? "check" : "plus"} size={16} />
         </button>
         <button
           className={`alliance-term ${alliance ? "chosen" : ""}`}
-          disabled={disabled}
+          disabled={disabled || (!alliance && (faction.denouncementUntil ?? 0) > game.turn)}
           onClick={() => {
             setAlliance(!alliance);
             setReview(false);
@@ -606,7 +606,7 @@ export function DealBuilder({ game, faction, disabled, onTrade, onPreview }) {
           <Icon name="link" size={18} />
           <span>
             양측 동맹 · 10턴
-            <small>함께 공격하지 않기로 약속 · 시야 공유 없음</small>
+            <small>{(faction.denouncementUntil ?? 0) > game.turn ? "공개비난 중 동맹 불가" : "공격·방어 전쟁 공동 참전 · 10턴 갱신 · 시야 공유 없음"}</small>
           </span>
           <Icon name={alliance ? "check" : "plus"} size={16} />
         </button>

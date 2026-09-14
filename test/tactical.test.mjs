@@ -207,6 +207,7 @@ test("resource facility produces one, population sets cap, excess legacy stock i
   const g = field(),
     c = city(g),
     u = addUnit(g, "p1", "builder", { q: 4, r: 3 });
+  c.citizenPolicy = { auto: false, lockedSlots: [], priority: [] };
   const t = g.tiles.find((t) => equal(t, u));
   t.resource = "iron";
   cmd(g, u, "develop");
@@ -297,6 +298,7 @@ test("NPC quote has no economic mutation and exact additional gold matches real 
 test("human quote never predicts willingness or exposes inventory and requires actual consent", () => {
   const g = createGame();
   g.wars = ["p1|p2"];
+  g.warStarted = { "p1|p2": g.turn - 10 };
   const raw = {
     factionId: "p2",
     peace: true,
@@ -319,6 +321,7 @@ test("wars do not expire and accepted NPC peace only lifts redeclaration restric
   const g = createGame();
   g.wars = ["p1|p3"];
   g.turn = 15;
+  g.warStarted = { "p1|p3": 1 };
   assert.ok(observe(g, "p1").factions.find((f) => f.id === "p3").hostile);
   trade(g, "peace", { factionId: "p3", gold: 40 });
   assert.throws(() => trade(g, "declareWar", { factionId: "p3" }));
@@ -330,6 +333,7 @@ test("wars do not expire and accepted NPC peace only lifts redeclaration restric
 test("combined peace quote and acceptance match and cannot automatically resume war", () => {
   const g = createGame();
   g.wars = ["p1|p3"];
+  g.warStarted = { "p1|p3": g.turn - 10 };
   const raw = {
     factionId: "p3",
     peace: true,

@@ -125,6 +125,20 @@ export function Penalties({ entity }) {
     </>
   );
 }
+export function CampDetails({ game, city, unit, disabled, onTrade }) {
+  if (!city?.camp) return null;
+  const state = city.campState;
+  const garrison = unit?.owner === game.playerId && !TYPES[unit.type]?.civilian && !TYPES[unit.type]?.internal ? unit
+    : game.units.find((candidate) => candidate.owner === game.playerId && key(candidate) === key(city) && !TYPES[candidate.type]?.civilian && !TYPES[candidate.type]?.internal);
+  return <section className="logistics-card" aria-label="야만인 거점 약탈">
+    <strong>{city.name} · 야만인 거점</strong>
+    <p>거점은 일반 도시로 성장하거나 유닛을 생산하지 않아요. 점령한 거점 위의 군사 유닛으로 10턴마다 약탈할 수 있어요.</p>
+    <p>약탈 보상: 식량 {state?.pillageFood ?? 20} + 골드 {state?.pillageGold ?? 20}. 식량은 가까운 내 일반 도시로 보냅니다.</p>
+    {state ? <p>{state.canPillage ? "지금 약탈 가능" : `다음 약탈 ${Math.max(0, (state.nextPillageTurn ?? game.turn) - game.turn)}턴 후`}</p> : null}
+    <button className="soft-button" disabled={disabled || !garrison || state?.canPillage !== true} onClick={() => onTrade({ action: "pillageCamp", cityId: city.id, unitId: garrison.id })}>거점 약탈 · 식량 20 / 골드 20</button>
+    {!garrison ? <p className="fine-print">거점 칸에 내 군사 유닛을 배치하세요.</p> : null}
+  </section>;
+}
 export function Selection({
   game,
   unit,
@@ -286,7 +300,7 @@ export function Selection({
             </span>
             <Bar value={unit.hp} max={maxHealth(unit)} />
           </div>
-        ) : city?.owner === game.playerId ? (
+        ) : city?.owner === game.playerId && !city.camp ? (
           <div className="selection-numbers">
             <span>
               인구 <b className="population-number">{city.population}</b>
@@ -344,7 +358,7 @@ export function Selection({
           ) : null}
         </div>
       ) : null}
-      {city?.owner === game.playerId ? (
+      {city?.owner === game.playerId && !city.camp ? (
         <div className="city-growth">
           <span
             data-tip={
@@ -522,7 +536,7 @@ export function Selection({
             <span>운송 상세</span>
           </button>
         </div>
-      ) : city?.owner === game.playerId ? (
+      ) : city?.owner === game.playerId && !city.camp ? (
         <div className="selection-actions">
           <span className="city-queue">
             {city.queue
@@ -660,9 +674,10 @@ export function Selection({
       ) : city ? (
         <Penalties entity={city} />
       ) : null}
+      <CampDetails game={game} city={city?.camp ? city : game.cities.find((candidate) => candidate.camp && unit && key(candidate) === key(unit))} unit={unit} disabled={disabled} onTrade={onTrade} />
       <LogisticsSelectionDetails
         game={game}
-        city={city}
+        city={city?.camp ? null : city}
         unit={unit}
         tile={tile}
         disabled={disabled}
@@ -1018,7 +1033,7 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
           const price = game.economy.unitPrices?.[type] ?? def.cost;
           const buyable =
             !!onBuy &&
-            game.rulesVersion === "expansion-v1" &&
+            (game.capabilities?.populationRules === true || game.rulesVersion === "expansion-v1") &&
             !!TYPES[type] &&
             !TYPES[type].internal &&
             type !== "merchant" &&
@@ -1130,7 +1145,7 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
           <Icon name="wheat" size={16} /> 생산 안 함 · 식량 생산 +25%
         </button>
       }
-      {game.rulesVersion === "expansion-v1" && onBuy && detailedSupply ? (
+      {(game.capabilities?.populationRules === true || game.rulesVersion === "expansion-v1") && onBuy && detailedSupply ? (
         <small className="logistics-footnote">
           상세 보급 ON에서는 전투 병력 즉시 구매를 숨기고 인구 동원 대기열에서 예약해요. 각 줄의 골드 버튼은 민간 유닛만 보여요.
         </small>
@@ -1139,7 +1154,7 @@ export function Production({ game, city, disabled, onChoose, onTrade, onBuy, enc
         자원은 생산을 예약할 때 차감돼요. 생산을 바꾸거나 취소하면 예약 자원이
         반환돼요. 생산 종류를 바꾸면 쌓인 생산력은 초기화돼요. 건축가와 전투
         유닛은 도시 칸에 함께 있을 수 있고, 같은 분류가 있거나 수용량이 가득
-        차면 완성 대기해요. 확장 규칙에서는 생산·즉시 구매마다 인구 0.5를
+        차면 완성 대기해요. 생산·즉시 구매마다 인구 0.5를
         배정하고, 도시는 최소 인구 1명을 남겨요. 성벽은 3레벨까지 증축하며
         유닛 칸을 사용하지 않아요.
       </p>
@@ -1192,6 +1207,8 @@ export function Rules() {
         명령과 초시계가 멈춰요.
       </p>
       <h3>성벽과 범위</h3>
+      <p>공개비난은 10턴 지속되고 3턴이 지나면 공식 전쟁을 선포할 수 있어요. 비난 중에는 동맹을 맺을 수 없어요. 동맹은 10턴마다 갱신할 수 있고 공격·방어 전쟁에 함께 참전해요. 개전 후 10턴 동안 평화 협정은 금지돼요. 기습 전쟁은 제3국과의 관계를 악화시켜요.</p>
+      <p>내 국경 안과 주변 2칸에 상대가 정착하면 도시 자진 철거를, 상대 군대가 3턴 연속 관측되면 철군을 최후통첩으로 요구할 수 있어요. 수락하면 10턴간 재정착·군대 재진입이 금지되며 먼저 선전포고해야 다시 들어갈 수 있어요. 거절하면 즉시 명분을 얻고 직접 명분 전쟁을 선포할 수 있어요. 도시 상세에서는 자진 철거를 확인 후 실행할 수 있고, 마지막 도시를 철거하면 패배할 수 있어요.</p>
       <p>
         도시 생산에서 성벽을 1~3레벨로 건설·증축해요. 비용은 30·55·80 생산력,
         레벨마다 체력 +50. 성벽 도시에서는 보이는 2칸 이내 적 유닛에 턴당 한 번

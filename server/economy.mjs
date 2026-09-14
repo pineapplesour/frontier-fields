@@ -169,8 +169,7 @@ function farmBase(g, tile) {
       candidate.owner === tile.owner &&
       (candidate.q !== tile.q || candidate.r !== tile.r) &&
       distance(candidate, tile) === 1 &&
-      (g.rulesVersion !== "expansion-v1" ||
-        assignedCity(g, candidate)?.id === ownerCity?.id),
+      assignedCity(g, candidate)?.id === ownerCity?.id,
   ).length;
   return farmTerrainYield(tile).base + finite(tile.fertility) + adjacent;
 }

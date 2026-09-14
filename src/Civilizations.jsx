@@ -5,6 +5,8 @@ import { Icon } from "./Icons.jsx";
 import { DealBuilder, DealSummary } from "./DealBuilder.jsx";
 import { factionFor, relationColor } from "./factions.js";
 import { publicRelationAt, relationPresentation } from "./publicRelations.js";
+import { TerritorialDiplomacy } from "./TerritorialDiplomacy.jsx";
+import { ultimatumDescription, ultimatumAcceptanceLabel, isTerritorialUltimatum } from "./territorialDiplomacy.js";
 import {
   guaranteeActions,
   guaranteeDirectionLabel,
@@ -360,6 +362,11 @@ export function Civilization({
     ].includes(action)
       ? tradeDisabled
       : disabled;
+  const peaceLockedTurns = Math.max(0, (f.peaceLockedUntil ?? game.turn) - game.turn);
+  const denouncementTurns = Math.max(0, (f.denouncementUntil ?? 0) - game.turn);
+  const formalWait = Math.max(0, (f.denouncementReadyTurn ?? game.turn) - game.turn);
+  const warLabel = f.warJustification?.reason === "denouncement" ? "공식 전쟁" : f.warJustification?.justified ? "명분 전쟁" : denouncementTurns && !formalWait ? "공식 전쟁" : "기습 전쟁";
+  useEffect(() => { setConfirm(null); }, [f.id]);
   return (
     <Modal title={`${f.name} · 문명`} onClose={onClose} wide={tab === "trade"}>
       <div className="civ-profile" style={{ "--faction": f.color }}>
@@ -434,13 +441,18 @@ export function Civilization({
               : barbarian
                 ? "항상 적대합니다. 거점을 파괴하면 그곳에서 병력이 더 생성되지 않아요."
                 : f.hostile
-                  ? "전쟁 중입니다. 평화 협정을 제안할 수 있어요."
+                  ? peaceLockedTurns ? `전쟁 중 · 개전 후 10턴 동안 평화 불가 · ${peaceLockedTurns}턴 남음` : "전쟁 중입니다. 평화 협정을 제안할 수 있어요."
                   : f.relation === "alliance"
-                    ? `동맹 ${f.allianceUntil - game.turn + 1}턴 남음 · 공격 금지 · 시야 공유 없음`
+                    ? `동맹 ${f.allianceUntil - game.turn + 1}턴 남음 · 공격·방어 전쟁 공동 참전 · 10턴 갱신 가능 · 시야 공유 없음`
                     : atPeace
                       ? `평화 협정 ${f.peaceUntil - game.turn + 1}턴 남음 · 선전포고 불가`
                       : "선전포고 전에는 공격할 수 없어요. 공개비난은 전쟁과 별개이며 10턴간 표시돼요."}
           </p>
+          {!own && !barbarian ? <>
+            {denouncementTurns > 0 ? <p className="fine-print">공개비난 {denouncementTurns}턴 남음 · {formalWait ? `${formalWait}턴 후 공식 전쟁 가능` : "공식 전쟁 가능"} · 비난 중 동맹 불가</p> : null}
+            {f.warJustification?.justified ? <p className="fine-print">전쟁 명분: {f.warJustification.reason === "denouncement" ? "공개비난 후 3턴 경과" : "국경 최후통첩 거절·만료"}</p> : null}
+            <TerritorialDiplomacy key={f.id} game={game} faction={f} disabled={tradeDisabled || atPeace || pending.some((proposal) => proposal.kind === "ultimatum")} onTrade={onTrade} />
+          </> : null}
           {!own && !barbarian ? (
             <div className="civ-actions">
               {!f.hostile && f.relation !== "alliance" && !atPeace ? (
@@ -468,7 +480,7 @@ export function Civilization({
                   />
                   <button
                     className="soft-button"
-                    disabled={independentAction("peace") || pending.length > 0}
+                    disabled={independentAction("peace") || pending.length > 0 || peaceLockedTurns > 0}
                     onClick={() => act("peace")}
                   >
                     평화 제안
@@ -484,8 +496,9 @@ export function Civilization({
                     onClick={() => act("declareWar")}
                   >
                     <Icon name="flag" size={16} />
-                    {confirm === "declareWar" ? "선전포고 확정" : "전쟁 선포"}
+                    {confirm === "declareWar" ? `${warLabel} 선포 확정` : `${warLabel} 선포`}
                   </button>
+                  <p className="fine-print">{warLabel === "기습 전쟁" ? "기습 전쟁은 제3국과의 관계를 악화시켜요. 공개비난 후 3턴을 기다리면 공식 전쟁이 가능해요." : "명분 또는 공개비난 조건을 충족한 전쟁입니다."} 모든 개전은 10턴 동안 평화를 맺을 수 없고, 동맹국이 함께 참전할 수 있어요.</p>
                   <button
                     className="soft-button"
                     disabled={disabled || f.relation === "alliance"}
@@ -498,7 +511,7 @@ export function Civilization({
                     disabled={
                       independentAction(
                         f.relation === "alliance" ? "breakAlliance" : "alliance",
-                      ) || pending.length > 0
+                      ) || pending.length > 0 || (f.relation !== "alliance" && denouncementTurns > 0)
                     }
                     onClick={() =>
                       act(
@@ -514,6 +527,7 @@ export function Civilization({
                         : "동맹 파기"
                       : "동맹 요청"}
                   </button>
+                  {f.relation === "alliance" ? <button className="soft-button" disabled={tradeDisabled || pending.length > 0 || denouncementTurns > 0} onClick={() => act("alliance")}>동맹 10턴 갱신 요청</button> : null}
                   <button
                     className="soft-button"
                     disabled={independentAction("gift") || game.economy.gold < 20}
@@ -552,7 +566,7 @@ export function Civilization({
             {p.kind === "deal"
               ? "통합 거래 제안"
               : p.kind === "ultimatum"
-                ? `금 요구 최후통첩 · ${p.gold}G 지급 요구 · 미응답 시 자동 전쟁 없음`
+                ? `${ultimatumDescription(p)} · ${isTerritorialUltimatum(p) ? "거절·만료 시 명분 획득 · " : ""}자동 개전 없음`
               : p.kind === "alliance"
                 ? "10턴 동맹"
                 : p.kind === "trade"
@@ -574,11 +588,13 @@ export function Civilization({
             <div className="time-presets">
               <button
                 disabled={independentAction("acceptProposal")}
-                onClick={() =>
-                  onTrade({ action: "acceptProposal", proposalId: p.id })
-                }
+                onClick={async () => {
+                  if (isTerritorialUltimatum(p) && confirm !== `accept:${p.id}`) { setConfirm(`accept:${p.id}`); return; }
+                  await onTrade({ action: "acceptProposal", proposalId: p.id });
+                  setConfirm(null);
+                }}
               >
-                {p.kind === "ultimatum" ? `${p.gold}G 지급하고 수락` : "수락"}
+                {p.kind === "ultimatum" ? `${confirm === `accept:${p.id}` ? "확정: " : ""}${ultimatumAcceptanceLabel(p)}` : "수락"}
               </button>
               <button
                 disabled={independentAction("rejectProposal")}

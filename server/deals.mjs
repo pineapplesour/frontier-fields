@@ -10,6 +10,7 @@ import {
 } from "../shared/rules.js";
 import { notifyTrade } from "./notifications.mjs";
 import { handleUltimatum } from "./ultimatums.mjs";
+import { peaceIssue, clearWarRecord, syncAllianceWars } from "./warDiplomacy.mjs";
 import { isSupplyOn } from "./economy.mjs";
 import {
   cityFoodCapacity,
@@ -246,10 +247,11 @@ export function handleDeal(
     relation,
     announceWar,
     npcWarRisk = null,
+    razeCity = null,
     preview = false,
   },
 ) {
-  if (handleUltimatum(g, player, raw, { GameError, event, atWar, relation })) return true;
+  if (handleUltimatum(g, player, raw, { GameError, event, atWar, relation, observation: raw.observation, razeCity })) return true;
   const fail = (text) => {
     throw new GameError(text);
   };
@@ -278,6 +280,7 @@ export function handleDeal(
     }
   };
   const validate = (p, escrow) => {
+    if (p.peace && peaceIssue(g, p.from, p.to)) fail(peaceIssue(g, p.from, p.to));
     if (atWar(g, p.from, p.to) && !p.peace)
       fail("전쟁 중에는 평화 협정 조건을 포함해 주세요.");
     if (!dealEntitiesValid(g, p))
@@ -289,7 +292,7 @@ export function handleDeal(
     if (
       p.alliance &&
       [p.from, p.to].some(
-        (who) => (g.denouncements[pair(p.from, p.to)] ?? 0) >= g.turn,
+        (who) => (g.denouncements[pair(p.from, p.to)] ?? 0) > g.turn,
       )
     )
       fail("공개비난이 지속되는 동안에는 동맹할 수 없어요.");
@@ -373,6 +376,7 @@ export function handleDeal(
     }
     if (p.peace) {
       g.wars = g.wars.filter((k) => k !== pair(p.from, p.to));
+      clearWarRecord(g, p.from, p.to);
       g.peaceUntil[pair(p.from, p.to)] = g.turn + 5;
     }
     g.gold[p.to] += p.give.gold - p.receive.gold;
@@ -417,7 +421,14 @@ export function handleDeal(
         announceWar(g, from, side.warAgainst);
       }
     }
-    if (p.alliance) g.alliances[pair(p.from, p.to)] = g.turn + 10;
+    if (p.alliance) {
+      g.alliances[pair(p.from, p.to)] = g.turn + 10;
+      const coalition = syncAllianceWars(g);
+      for (const edge of coalition.brokenAlliances)
+        event(g, Object.keys(factions(g)), `양 진영에 걸친 동맹 ${edge}이 해제됐어요.`);
+      for (const war of coalition.newWars)
+        announceWar(g, war.from, war.to, { reason: "alliance", expandAlliances: false });
+    }
     g.relations[pair(p.from, p.to)] =
       (g.relations[pair(p.from, p.to)] ?? 0) + 15;
     p.settled = true;
@@ -524,6 +535,7 @@ export function handleDeal(
     peace: raw.peace === true,
     expires: g.turn + 3,
   };
+  if (p.peace && peaceIssue(g, player, to)) fail(peaceIssue(g, player, to));
   if (
     !p.alliance &&
     !p.peace &&
@@ -571,7 +583,7 @@ export function handleDeal(
   checkWar(to, p.receive.warAgainst, player);
   if (atWar(g, player, to) && !p.peace)
     fail("전쟁 중에는 평화 협정 조건을 포함해 주세요.");
-  if (p.alliance && (g.denouncements[pair(player, to)] ?? 0) >= g.turn)
+  if (p.alliance && (g.denouncements[pair(player, to)] ?? 0) > g.turn)
     fail("공개비난 중에는 동맹을 맺을 수 없어요.");
   p.labels = Object.fromEntries(
     [...g.units, ...g.cities]

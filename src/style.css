@@ -144,6 +144,9 @@ small {
 }
 .unit-label-name { font-size: 11px; white-space: nowrap; }
 .stack-picker button { display: inline-flex; align-items: center; gap: 6px; }
+.territorial-diplomacy { padding: 12px; border: 1px solid #889785; border-radius: 10px; margin: 12px 0; }
+.territorial-diplomacy label { display: grid; gap: 6px; margin: 10px 0; }
+.territorial-diplomacy select, .territorial-diplomacy button { min-height: 44px; max-width: 100%; }
 @media (pointer: coarse) { .world-unit-label { min-height: 44px; } }
 .world-labels > span {
   position: absolute;
@@ -164,6 +167,11 @@ small {
 .world-labels > .map-target-marker.picked {
   background: #ffdf72;
   border-color: #765511;
+}
+.world-labels > .map-target-marker { font-size: 12px; }
+.world-labels > .map-target-marker[data-displaced="true"]::before {
+  height: 2px;
+  background: #1b7354;
 }
 .map-target-toolbar {
   position: fixed;

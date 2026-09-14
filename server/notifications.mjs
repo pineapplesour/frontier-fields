@@ -54,6 +54,9 @@ const publicProposal = (g, proposal) => {
     "expires",
     "alliance",
     "peace",
+    "demand",
+    "cityId",
+    "cityName",
   ]) {
     if (proposal[field] !== undefined) result[field] = proposal[field];
   }

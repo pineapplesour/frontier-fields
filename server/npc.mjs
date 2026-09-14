@@ -64,7 +64,7 @@ const military = (u) => !isCivilian(u);
 function context(view, u) {
   const allies = view.units.filter((e) => e.owner === view.playerId);
   const foes = view.units.filter((e) => e.hostile && military(e));
-  const cities = view.cities.filter((c) => c.owner === view.playerId);
+  const cities = view.cities.filter((c) => c.owner === view.playerId && !c.camp);
   const enemyCities = view.cities.filter((c) => c.hostile);
   const tiles = new Map(view.tiles.map((t) => [key(t), t]));
   const home = [...cities].sort(
@@ -105,7 +105,7 @@ function context(view, u) {
 
 export function settlementSites(view, settler) {
   if (!isNpc(view)) return [];
-  const own = view.cities.filter((c) => c.owner === view.playerId);
+  const own = view.cities.filter((c) => c.owner === view.playerId && !c.camp);
   const tiles = new Map(view.tiles.map((t) => [key(t), t]));
   const threats = view.units.filter((u) => u.hostile && military(u));
   return view.tiles
@@ -153,7 +153,7 @@ export function settlementSites(view, settler) {
 export function npcEconomy(view) {
   if (!isNpc(view) || view.playerId === "barb") return [];
   const own = view.playerId,
-    cities = (view.cities ?? []).filter((c) => c.owner === own);
+    cities = (view.cities ?? []).filter((c) => c.owner === own && !c.camp);
   const units = (view.units ?? []).filter((u) => u.owner === own),
     army = units.filter(military);
   const foes = (view.units ?? []).filter((u) => u.hostile && military(u));

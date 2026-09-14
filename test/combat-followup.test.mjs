@@ -84,14 +84,15 @@ test("generated barbarian camps never overlap another city or foreign territory"
   }
 });
 
-test("automatic barbarian reinforcements require barbarian-owned camp land",()=>{
+test("automatic barbarian reinforcements use only neutral or barbarian land beside occupied camps",()=>{
   for(const owner of ["p1","barb"]){
     const g=createGame({mode:"practice"});g.activePlayer="p2";g.turn=4;
     g.units=g.units.filter(u=>u.owner!=="barb");
     for(const c of g.cities.filter(c=>c.camp))g.tiles.find(t=>equal(t,c)).owner=owner;
     resolveTurn(g);
     const spawned=g.units.filter(u=>u.owner==="barb");
-    if(owner==="p1")assert.equal(spawned.length,0);
-    else {assert.ok(spawned.length>0);assert.ok(spawned.every(u=>g.tiles.find(t=>equal(t,u)).owner==="barb"));}
+    assert.ok(spawned.length>0);
+    assert.ok(spawned.every(u=>[null,"barb"].includes(g.tiles.find(t=>equal(t,u)).owner)));
+    if(owner==="p1")assert.ok(spawned.every(u=>!g.cities.some(c=>c.camp&&equal(c,u))),"No spawn on a player-owned camp center");
   }
 });

@@ -71,6 +71,9 @@ import {
   npcTurnOrder,
 } from "./npc.mjs";
 import { handleDeal, refundDeal, dealEntitiesValid } from "./deals.mjs";
+import { ensureWarDiplomacy, recordDenouncement, warJustification, peaceIssue, clearWarRecord, applyWarDiplomacy, syncAllianceWars } from "./warDiplomacy.mjs";
+import { updateTerritorialPresence, territorialDiplomacyView, restrictionViolation, expireTerritorialUltimatums } from "./diplomacyRules.mjs";
+import { captureBarbarianCamp, publicCampState, pillageBarbarianCamp, campSpawnSites } from "./barbarianCamps.mjs";
 import {
   combatStrength,
   riverBetween,
@@ -176,15 +179,18 @@ export const atWar = (g, a, b) =>
   a !== b &&
   (a === "barb" || b === "barb" || (g.wars ?? ["p1|p2"]).includes(pair(a, b)));
 function endWar(g, a, b) {
+  const issue = peaceIssue(g, a, b);
+  if (issue) throw new GameError(issue);
   g.wars = g.wars.filter((k) => k !== pair(a, b));
+  clearWarRecord(g, a, b);
   g.peaceUntil[pair(a, b)] = g.turn + 5;
 }
 export function relation(g, a, b) {
   const k = pair(a, b);
   if (a === b) return "self";
   if (atWar(g, a, b)) return "war";
-  if ((g.alliances?.[k] ?? 0) >= g.turn) return "alliance";
-  if ((g.denouncements?.[k] ?? 0) >= g.turn) return "denounced";
+  if ((g.alliances?.[k] ?? 0) > g.turn) return "alliance";
+  if ((g.denouncements?.[k] ?? 0) > g.turn) return "denounced";
   const value = g.relations?.[k] ?? 0;
   return value >= 20 ? "good" : value <= -20 ? "bad" : "neutral";
 }
@@ -283,6 +289,7 @@ function interruptWallRepair(g, c) {
   return true;
 }
 function normalizeState(g) {
+  ensureWarDiplomacy(g);
   ensureLogisticsState(g);
   for (const u of g.units ?? []) normalizeFormation(u);
   for (const c of g.cities ?? []) normalizeCityDefense(c);
@@ -614,7 +621,7 @@ function processMobilization(g, player) {
   ensureEconomyState(g);
   if (!isSupplyOn(g)) return [];
   const dispatched = [];
-  for (const city of g.cities.filter((candidate) => candidate.owner === player)) {
+  for (const city of g.cities.filter((candidate) => candidate.owner === player && !candidate.camp)) {
     const unit = dispatchMobilization(g, player, city);
     if (unit) dispatched.push(unit);
   }
@@ -631,8 +638,7 @@ function canClaim(g, tile, city) {
   return (
     tile &&
     tile.terrain !== "mountain" &&
-    distance(tile, city) <=
-      (isExpansion(g) ? TERRITORY_MAX_RADIUS : Number.POSITIVE_INFINITY) &&
+    distance(tile, city) <= TERRITORY_MAX_RADIUS &&
     (!tile.owner || tile.owner === city.owner)
   );
 }
@@ -664,6 +670,29 @@ function deterministicTileCity(g, tile, cities = g.cities) {
     )[0] ?? null;
 }
 
+function razeCity(g, player, cityId) {
+  const city = g.cities.find(c => c.id === cityId && c.owner === player && !c.camp);
+  if (!city) throw new GameError("철거할 본인 도시를 확인해 주세요.");
+  const affected = g.tiles.filter(t => t.owner === player && deterministicTileCity(g, t)?.id === cityId);
+  g.cities = g.cities.filter(c => c.id !== cityId);
+  // Existing neighbouring cities retain connected land they can administer.
+  // Population and unfinished construction are not refunded by demolition.
+  for (const t of affected) { t.owner = null; t.cityId = null; }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const t of affected.filter(t => !t.owner)) {
+      const successor = g.cities.filter(c => c.owner === player && !c.camp && distance(c,t) <= TERRITORY_MAX_RADIUS)
+        .sort((a,b) => distance(a,t)-distance(b,t) || a.id.localeCompare(b.id))
+        .find(c => neighbors(t).some(n => { const x=tileAt(g,n); return x?.owner === player && (x.cityId === c.id || equal(x,c)); }));
+      if (successor) { t.owner = player; t.cityId = successor.id; changed = true; }
+    }
+  }
+  for (const u of g.units.filter(u => u.homeCityId === cityId)) u.homeCityId = null;
+  for (const c of g.cities) if (c.expansionTarget && !expansionCandidates(g,c).some(t=>equal(t,c.expansionTarget))) c.expansionTarget=null;
+  event(g, [...new Set([player, ...seenBy(g,city)])], `${city.name}을 자진 철거했어요. 도시 인구와 생산은 사라지고 군대는 남아요.`);
+}
+
 function cityFootprintConnected(g, city, movedTile = null, movedTo = null) {
   const cities = g.cities.filter((candidate) => candidate.owner === city.owner && !candidate.camp);
   const assignment = (tile) => {
@@ -688,7 +717,7 @@ function cityFootprintConnected(g, city, movedTile = null, movedTo = null) {
 }
 
 function reassignTile(g, player, target, toCityId) {
-  if (!isExpansion(g) || !coordinate(target))
+  if (!coordinate(target))
     throw new GameError("도시 소속을 바꿀 지도 칸을 확인해 주세요.");
   const tile = tileAt(g, target),
     cities = g.cities.filter((city) => city.owner === player && !city.camp),
@@ -897,13 +926,6 @@ function selectExpansionTile(g, city) {
 }
 
 function expandOne(g, city, reason = "growth") {
-  if (!isExpansion(g)) {
-    const radius = 1 + Math.floor(city.population / 3);
-    for (const t of g.tiles)
-      if (t.terrain !== "mountain" && distance(t, city) <= radius)
-        claim(g, t, city);
-    return null;
-  }
   const tile = selectExpansionTile(g, city);
   if (!tile || !claim(g, tile, city)) return null;
   const nextRadius = Math.max(
@@ -918,12 +940,6 @@ function expandOne(g, city, reason = "growth") {
 }
 
 function territory(g, city, { initial = false } = {}) {
-  if (!isExpansion(g)) {
-    const radius = 1 + Math.floor(city.population / 3);
-    for (const t of g.tiles)
-      if (t.terrain !== "mountain" && distance(t, city) <= radius) claim(g, t, city);
-    return;
-  }
   city.territoryRadius ??= TERRITORY_BASE_RADIUS;
   city.territoryGrowth ??= 0;
   if (!initial) return expandOne(g, city, "growth");
@@ -1133,12 +1149,11 @@ export function visibility(g, player) {
 }
 export function farmYield(g, t, previewOwner = t.owner) {
   const terrainYield = farmTerrainYield(t);
-  const tileCity = isExpansion(g) ? deterministicTileCity(g, t, g.cities)?.id : null;
+  const tileCity = deterministicTileCity(g, t, g.cities)?.id;
   const adjacent = neighbors(t).filter((n) => {
     const x = tileAt(g, n);
     if (!x?.farm || x.ruin || x.owner !== previewOwner) return false;
     return (
-      !isExpansion(g) ||
       deterministicTileCity(g, x, g.cities)?.id === tileCity
     );
   }).length;
@@ -1152,7 +1167,7 @@ export function farmYield(g, t, previewOwner = t.owner) {
 export function economy(g, player) {
   ensureEconomyState(g);
   const detailedSupply = isSupplyOn(g);
-  const cities = g.cities.filter((c) => c.owner === player);
+  const cities = g.cities.filter((c) => c.owner === player && !c.camp);
   const farms = g.tiles.filter(
     (t) => t.owner === player && t.farm && !t.ruin,
   );
@@ -1179,25 +1194,7 @@ export function economy(g, player) {
   const citizen = new Map(
     cities.map((c) => [
       c.id,
-      isExpansion(g)
-        ? citizenYields(g, c)
-        : {
-            budget: 0,
-            assigned: 0,
-            available: 0,
-            slots: [],
-            assignments: [],
-            locked: [],
-            policy: { auto: false, lockedSlots: [], priority: [] },
-            yields: {
-              food: 0,
-              production: 0,
-              gold: 0,
-              resources: Object.fromEntries(
-                Object.keys(RESOURCES).map((resource) => [resource, 0]),
-              ),
-            },
-          },
+      citizenYields(g, c),
     ]),
   );
   const network = supplyNetwork(g, player);
@@ -1265,9 +1262,7 @@ export function economy(g, player) {
       foodCapacity,
       foodLedger: detailedSupply
         ? "city-stock"
-        : isExpansion(g)
-          ? "growth-progress"
-          : "legacy-food",
+        : "growth-progress",
       fed: detailedSupply ? foodStock + foodGross >= foodConsumption : foodNet >= 0,
       productionRate,
       farmProduction,
@@ -1278,14 +1273,11 @@ export function economy(g, player) {
       territoryRadius: c.territoryRadius ?? Math.min(TERRITORY_MAX_RADIUS, 1 + Math.floor(c.population / 3)),
       territoryGrowth: c.territoryGrowth ?? 0,
       expansionTarget: c.expansionTarget ? { ...c.expansionTarget } : null,
-      manpowerCost:
-        isExpansion(g) || detailedSupply ? UNIT_MANPOWER_COST : 0,
+      manpowerCost: UNIT_MANPOWER_COST,
       manpowerReserved: c.manpowerReserved ?? 0,
       manpowerAvailable: Math.max(
         0,
-      isExpansion(g) || detailedSupply
-        ? c.population - MIN_CITY_POPULATION
-        : 0,
+        c.population - MIN_CITY_POPULATION,
       ),
       mobilization: {
         ...mobilization,
@@ -1296,9 +1288,7 @@ export function economy(g, player) {
       mobilizationReserved: mobilization.pendingManpower,
       manpowerQueueAvailable: Math.max(
         0,
-        isExpansion(g) || detailedSupply
-          ? c.population - MIN_CITY_POPULATION - mobilization.pendingManpower
-          : 0,
+        c.population - MIN_CITY_POPULATION - mobilization.pendingManpower,
       ),
       citizenAllocation: publicCitizenAllocation(g, c),
       productionEta:
@@ -1367,10 +1357,8 @@ export function economy(g, player) {
     resources: { ...g.stockpiles[player] },
     gold: g.gold?.[player] ?? 0,
     goldIncome,
-    manpowerCost:
-      isExpansion(g) || detailedSupply ? UNIT_MANPOWER_COST : 0,
-    minimumCityPopulation:
-      isExpansion(g) || detailedSupply ? MIN_CITY_POPULATION : 0,
+    manpowerCost: UNIT_MANPOWER_COST,
+    minimumCityPopulation: MIN_CITY_POPULATION,
     supplyMode: detailedSupply ? SUPPLY_MODES.ON : SUPPLY_MODES.OFF,
     militaryFoodMultiplier: detailedSupply ? MILITARY_FOOD_MULTIPLIER : null,
     militaryFood:
@@ -1397,6 +1385,7 @@ export function economy(g, player) {
 export function observe(g, player, now = Date.now()) {
   if (!g.players[player]) throw new GameError("플레이어 권한이 필요해요.", 403);
   ensureGuaranteeState(g);
+  ensureWarDiplomacy(g);
   for (const c of g.cities) normalizeCityDefense(c);
   const seen = visibility(g, player);
   const eco = economy(g, player);
@@ -1409,7 +1398,7 @@ export function observe(g, player, now = Date.now()) {
   const opponents = turnIds(g).filter((id) => id !== player),
     opponent = opponents[0] ?? other(player),
     factions = factionMap(g);
-  return {
+  const observation = {
     mode: g.mode,
     rulesVersion: g.rulesVersion ?? "legacy",
     compatibility: { canUpgradeRules: !isExpansion(g), rulesRevision: "repair-v1" },
@@ -1456,7 +1445,7 @@ export function observe(g, player, now = Date.now()) {
     ...(g.experiment ? { experimentCosts: experimentCosts(g) } : {}),
     balance: g.balance ?? normalizeBalance(null),
     world: { width: WIDTH, height: HEIGHT, wrapX: false, wrapY: false },
-    capabilities: { resourceConversion: true, logistics: true, encampment: true, tradingPost: true },
+    capabilities: { resourceConversion: true, logistics: true, encampment: true, tradingPost: true, populationRules: true, territorialDiplomacy: true },
     logistics,
     cargo: logistics.cargo,
     roads: logistics.roads,
@@ -1468,6 +1457,10 @@ export function observe(g, player, now = Date.now()) {
       peaceUntil: g.peaceUntil?.[pair(player, id)] ?? 0,
       relation: relation(g, player, id),
       allianceUntil: g.alliances?.[pair(player, id)] ?? 0,
+      denouncementUntil: g.denouncements?.[pair(player, id)] ?? 0,
+      denouncementReadyTurn: (g.denouncementStarted?.[`${player}>${id}`] ?? ((g.denouncements?.[pair(player,id)] ?? 0) - 10)) + 3,
+      warJustification: warJustification(g, player, id),
+      peaceLockedUntil: atWar(g, player, id) ? (g.warStarted?.[pair(player,id)] ?? g.turn) + 10 : 0,
       openBordersUntil: g.openBorders?.[`${id}>${player}`] ?? 0,
       grantedBordersUntil: g.openBorders?.[`${player}>${id}`] ?? 0,
     })),
@@ -1544,6 +1537,7 @@ export function observe(g, player, now = Date.now()) {
         c.owner === player
           ? {
               ...c,
+              campState: publicCampState(g, c, player),
               maxHp: cityMaxHealth(c),
               wallMaxHp: wallMaxHealth(c),
               ...eco.perCity.find((e) => e.id === c.id),
@@ -1564,13 +1558,10 @@ export function observe(g, player, now = Date.now()) {
                   const status = wallRepairEligibility(t.encampment, { owner: player, turn: g.turn });
                   return { q: t.q, r: t.r, wallHp: structureWallHp(t.encampment), wallMaxHp: t.encampment.wallMaxHp ?? 50, repairIssue: status.ok ? null : status.message };
                 }),
-              ...(isExpansion(g)
-                ? {
-                    expansionCandidates: expansionCandidates(g, c).map(
-                      (t) => ({ q: t.q, r: t.r }),
-                    ),
-                  }
-                : {}),
+              razeIssue: c.camp ? "야만인 거점은 도시 철거 대상이 아니에요." : null,
+              expansionCandidates: expansionCandidates(g, c).map(
+                (t) => ({ q: t.q, r: t.r }),
+              ),
             }
           : {
               id: c.id,
@@ -1584,6 +1575,7 @@ export function observe(g, player, now = Date.now()) {
               wallHp: cityWallHp(c),
               wallMaxHp: wallMaxHealth(c),
               camp: !!c.camp,
+              campState: publicCampState(g, c, player),
               maxHp: cityMaxHealth(c),
               capital: c.capital,
               hostile: atWar(g, player, c.owner),
@@ -1602,6 +1594,8 @@ export function observe(g, player, now = Date.now()) {
       )
       .map((c) => ({ ...c, ghost: true })),
   };
+  observation.territorialDiplomacy = territorialDiplomacyView(g, player, observation);
+  return observation;
 }
 export function updateContacts(g) {
   g.contacts ??= { p1: {}, p2: {} };
@@ -1671,6 +1665,12 @@ export function updateContacts(g) {
           size: u.size,
           lastSeenTurn: g.turn,
         };
+    updateTerritorialPresence(g, player, {
+      playerId: player, turn: g.turn,
+      tiles: g.tiles.filter(t => t.owner === player || seen.has(key(t))).map(t => ({ ...t, visible: true, explored: true })),
+      units: living(g).filter(u => u.owner === player || seen.has(key(u))),
+      cities: g.cities.filter(c => c.owner === player || seen.has(key(c))),
+    });
   }
 }
 function migrateSupplyMode(g, next, player) {
@@ -1856,7 +1856,7 @@ export function setCitySettings(
   now = Date.now(),
 ) {
   requirePlanning(g, player, turn ?? g.turn, now);
-  const city = g.cities.find((c) => c.id === cityId && c.owner === player);
+  const city = g.cities.find((c) => c.id === cityId && c.owner === player && !c.camp);
   if (!city) throw new GameError("설정할 아군 도시를 확인해 주세요.");
   if (expansionTarget === null) city.expansionTarget = null;
   else {
@@ -1894,7 +1894,7 @@ export function setCitizenSettings(
   now = Date.now(),
 ) {
   requirePlanning(g, player, turn ?? g.turn, now);
-  const city = g.cities.find((c) => c.id === cityId && c.owner === player);
+  const city = g.cities.find((c) => c.id === cityId && c.owner === player && !c.camp);
   if (!city) throw new GameError("설정할 아군 도시를 확인해 주세요.");
   if (typeof auto !== "boolean" || !Array.isArray(lockedSlots) || !Array.isArray(priority))
     throw new GameError("시민 배치 설정 형식이 올바르지 않아요.");
@@ -2142,6 +2142,8 @@ export function submitOrders(
       order.target = { q: raw.target.q, r: raw.target.r };
     }
     if (action === "move") {
+      if (military(u) && restrictionViolation(g, player, order.target, "military"))
+        throw new GameError("최후통첩 합의 지역이에요. 선전포고 전에는 군사를 진입시킬 수 없어요.");
       const destination = view.tiles.find(t => equal(t, order.target));
       if (!territoryEntryAllowed(view, player, destination) &&
           !canCrossBorder(view, u, u, order.target))
@@ -2225,6 +2227,8 @@ export function submitOrders(
       if (issue) throw new GameError(issue);
     }
     if (action === "found") {
+      if (restrictionViolation(g, player, u, "found"))
+        throw new GameError("최후통첩 합의 지역에는 10턴 동안 선전포고 없이 정착할 수 없어요.");
       const issue = settlementIssue(view, u);
       if (issue) throw new GameError(issue);
     }
@@ -2255,7 +2259,7 @@ export function submitOrders(
   const builds = production.map((p) => {
     const c = g.cities.find((c) => c.id === p.cityId && c.owner === player);
     if (
-      !c ||
+      !c || c.camp ||
       cityIds.has(c.id) ||
       (p.type !== null &&
         p.type !== "walls" &&
@@ -2311,12 +2315,12 @@ export function submitOrders(
         stocks[r] += n;
     const reserved = Number(c.manpowerReserved) || 0,
       required =
-        isExpansion(g) && Object.hasOwn(TYPES, p.type)
+        Object.hasOwn(TYPES, p.type)
           ? UNIT_MANPOWER_COST
           : 0,
       availableAfterRelease =
         c.population + reserved -
-        (isExpansion(g) ? MIN_CITY_POPULATION : 0);
+        MIN_CITY_POPULATION;
     if (
       required > reserved &&
       availableAfterRelease < required
@@ -2358,7 +2362,6 @@ export function submitOrders(
       c.production = 0;
     }
     if (
-      isExpansion(g) &&
       Object.hasOwn(TYPES, type) &&
       (Number(c.manpowerReserved) || 0) < UNIT_MANPOWER_COST
     )
@@ -2783,7 +2786,7 @@ function handleCombat(g, scope = living(g)) {
     const capturing = military(u) && !bombard && captureTarget && isCivilian(captureTarget) && distance(u, target) === 1 &&
       !g.cities.some(c => c.hp > 0 && equal(c, target)) &&
       !(targetStructure && (structureHp(targetStructure) > 0 || structureWallHp(targetStructure) > 0));
-    if (capturing && (u.movesLeft <= 0 || !Number.isFinite(movementCost({from:u,to:target},g)))) continue;
+    if (capturing && (u.movesLeft <= 0 || !canCrossBorder(g,u,u,target) || !Number.isFinite(movementCost({from:u,to:target},g)))) continue;
     if (!capturing) {
     u.fortified = false;
     u.fortifyPending = false;
@@ -3042,7 +3045,7 @@ function handleCombat(g, scope = living(g)) {
     c.hp = Math.max(0, c.hp - bodyLoss);
     if (loss && c.hp === 0 && !c.camp) {
       const invader = (cityAttackers.get(c.id) ?? []).find(unit =>
-        unit.hp > 0 && ["spearman", "cavalry"].includes(unit.type) && distance(unit, c) === 1);
+        unit.hp > 0 && ["spearman", "cavalry"].includes(unit.type) && distance(unit, c) === 1 && canCrossBorder(g,unit,unit,c));
       if (invader) {
         const from = { q: invader.q, r: invader.r };
         invader.q = c.q;
@@ -3062,6 +3065,7 @@ function handleCombat(g, scope = living(g)) {
         !target || distance(attacker, target) !== 1 ||
         !beforeHealth.some(({unit, owner}) => owner !== attacker.owner && unit.hp <= 0 && equal(unit, target) && (credited.get(unit.id) ?? []).includes(attacker)) ||
         tileAt(g, target)?.terrain === "mountain" ||
+        !canCrossBorder(g,attacker,attacker,target) ||
         living(g).some(unit => equal(unit, target) && blocksUnit(attacker, unit)) ||
         g.cities.some(city => city.hp > 0 && city.owner !== attacker.owner && equal(city, target))) continue;
     const from = { q: attacker.q, r: attacker.r };
@@ -3096,6 +3100,7 @@ function handleCombat(g, scope = living(g)) {
       u.order.retreat &&
       retreatCounts.get(key(u.order.retreat)) === 1 &&
       tileAt(g, u.order.retreat).terrain !== "mountain" &&
+      canCrossBorder(g,u,u,u.order.retreat) &&
       !living(g).some((e) => equal(e, u.order.retreat) && blocksUnit(u, e)) &&
       !g.cities.some(
         (c) => c.owner !== u.owner && c.hp > 0 && equal(c, u.order.retreat),
@@ -3240,7 +3245,8 @@ function handleActions(g, scope = living(g), endTurn = false) {
     if (
       a === "found" &&
       u.type === "settler" &&
-      !g.cities.some((c) => distance(c, u) < 4)
+      !g.cities.some((c) => distance(c, u) < 4) &&
+      !settlementIssue(g, u) && !restrictionViolation(g, u.owner, u, "found")
     ) {
       const city = {
         id: randomUUID(),
@@ -3267,9 +3273,9 @@ function handleActions(g, scope = living(g), endTurn = false) {
         capital: isExpansion(g) ? !g.founded?.[u.owner] : false,
         isolation: 0,
         supplied: true,
-        territoryRadius: isExpansion(g) ? TERRITORY_BASE_RADIUS : undefined,
-        territoryGrowth: isExpansion(g) ? 0 : undefined,
-        ...(isExpansion(g) ? { rulesVersion: "expansion-v1" } : {}),
+        territoryRadius: TERRITORY_BASE_RADIUS,
+        territoryGrowth: 0,
+        rulesVersion: "expansion-v1",
         lastIncomingAttackTurn: null,
         wallRepairStartedTurn: null,
         wallRepairStartHp: null,
@@ -3330,14 +3336,9 @@ function handleActions(g, scope = living(g), endTurn = false) {
         u.type !== "artillery" &&
         equal(u, c),
     );
-    if (c.camp && c.hp === 0) {
-      for (const t of g.tiles.filter((t) => t.cityId === c.id))
-        Object.assign(t, { owner: null, cityId: null, camp: false });
-      event(
-        g,
-        seenBy(g, c),
-        `${c.name}을 파괴했어요. 이 거점에서는 더 이상 병력이 나오지 않아요.`,
-      );
+    if (c.camp) {
+      if (c.hp === 0 && invader && captureBarbarianCamp(g, c, invader))
+        event(g, [...new Set([invader.owner, ...seenBy(g,c)])], `${c.name}을 점령했어요. 주둔 군사로 10턴마다 식량·골드를 약탈할 수 있고 주변 야만인은 계속 나타나요.`);
       continue;
     }
     if (c.hp === 0 && invader) {
@@ -3392,7 +3393,6 @@ function handleActions(g, scope = living(g), endTurn = false) {
     }
   }
   g.units = living(g);
-  g.cities = g.cities.filter((c) => !c.camp || c.hp > 0);
 }
 function settleGrowth(g, city, foodNet, owner, values = null) {
   // Legacy and expansion/off matches retain the original surplus ledger in
@@ -3460,21 +3460,6 @@ function settleGrowth(g, city, foodNet, owner, values = null) {
   }
   const before = city.food;
   city.food += foodNet;
-  if (!isExpansion(g)) {
-    if (city.food >= growthTarget(city.population)) {
-      city.food -= growthTarget(city.population);
-      city.population++;
-      territory(g, city);
-      event(g, [owner], `${city.name} 인구가 ${city.population}으로 늘었어요.`);
-    }
-    if (city.food < 0) {
-      city.food = 0;
-      if (city.population > MIN_CITY_POPULATION)
-        city.population = Math.max(MIN_CITY_POPULATION, city.population - 1);
-      event(g, [owner], `${city.name}: 식량이 부족해 인구가 줄었어요.`);
-    }
-    return;
-  }
   const initialHalf = growthHalfTarget(city.population);
   let halfClaimed =
     city.territoryHalfwayClaimed ?? before >= initialHalf;
@@ -3525,7 +3510,7 @@ function settleGrowth(g, city, foodNet, owner, values = null) {
     event(g, [owner], `${city.name}: 식량이 부족해 인구가 줄었어요.`);
   }
   city.territoryHalfwayClaimed = halfClaimed;
-  if (isExpansion(g)) city.growthProgress = Math.max(0, city.food);
+  city.growthProgress = Math.max(0, city.food);
 }
 
 function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
@@ -3550,7 +3535,7 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
     // pending citizens remain ordinary workers until this commit.
     processMobilization(g, p);
     const settledEconomy = economy(g, p);
-    for (const c of g.cities.filter((c) => c.owner === p)) {
+    for (const c of g.cities.filter((c) => c.owner === p && !c.camp)) {
       normalizeCityDefense(c);
       if (
         !c.camp &&
@@ -3697,7 +3682,6 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
             // half a population.  A legacy serialized queue has no reserve;
             // charge it at completion instead of minting a free unit.
             if (
-              isExpansion(g) &&
               (Number(c.manpowerReserved) || 0) < UNIT_MANPOWER_COST &&
               !reserveManpower(c, UNIT_MANPOWER_COST)
             ) {
@@ -3712,7 +3696,7 @@ function growAndProduce(g, owners = ["p1", "p2", "p3", "p4", "cs"]) {
             }
             addUnit(g, p, type, spawn);
             const produced = g.units.at(-1);
-            if (isExpansion(g)) Object.assign(produced, unitManpower(g, c, p));
+            Object.assign(produced, unitManpower(g, c, p));
             if (type === "merchant") produced.tradingPostCityId = c.id;
             c.production -= productionType(type, c).cost;
             c.queue = null;
@@ -4198,14 +4182,14 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
       }
     }
     if (!realtime && npcIds.includes("barb") && g.turn % 4 === 0)
-      for (const c of g.cities.filter((c) => c.camp && c.hp > 0 && c.owner === "barb" && tileAt(g, c)?.owner === "barb")) {
+      for (const site of campSpawnSites(g)) {
         if (living(g).filter((u) => u.owner === "barb").length >= 12) break;
-        if (!living(g).some((u) => equal(u, c)))
-          addUnit(
+        const c = g.cities.find(c => c.id === site.campId);
+        addUnit(
             g,
             "barb",
             g.turn >= 12 ? "cavalry" : "spearman",
-            { q: c.q, r: c.r },
+            { q: site.q, r: site.r },
             { home: { q: c.q, r: c.r }, movesLeft: 0 },
           );
       }
@@ -4216,6 +4200,7 @@ function playNpcs(g, now, selected = null, { realtime = false, settleOnly = fals
   }
 }
 function expireProposals(g) {
+  expireTerritorialUltimatums(g, { event });
   for (const [permission, until] of Object.entries(g.openBorders ?? {})) {
     if (until > g.turn) continue;
     delete g.openBorders[permission];
@@ -4355,7 +4340,11 @@ export function transact(g, player, raw, now = Date.now()) {
     updateContacts(g);
     return observe(g, player, now);
   }
-  if (action === "reassignTile" || action === "assignTile") {
+  if (action === "pillageCamp") {
+    pillageBarbarianCamp(g, player, raw, { GameError, event });
+  } else if (action === "razeCity") {
+    razeCity(g, player, raw.cityId);
+  } else if (action === "reassignTile" || action === "assignTile") {
     reassignTile(
       g,
       player,
@@ -4371,13 +4360,13 @@ export function transact(g, player, raw, now = Date.now()) {
       !g.explored[player]?.[key(t)] ||
       t.owner ||
       t.terrain === "mountain" ||
-      distance(t, c) > (isExpansion(g) ? TERRITORY_MAX_RADIUS : 4) ||
+      distance(t, c) > TERRITORY_MAX_RADIUS ||
       !neighbors(t).some(
         (p) => tileAt(g, p)?.cityId === c.id && tileAt(g, p)?.owner === player,
       )
     )
       throw new GameError(
-        `도시 영토와 이어진 ${isExpansion(g) ? TERRITORY_MAX_RADIUS : 4}칸 이내의 미소유 땅만 구매할 수 있어요.`,
+        `도시 영토와 이어진 ${TERRITORY_MAX_RADIUS}칸 이내의 미소유 땅만 구매할 수 있어요.`,
       );
     const cost = landPrice(t, c);
     if (g.gold[player] < cost) throw new GameError("골드가 부족해요.");
@@ -4401,8 +4390,6 @@ export function transact(g, player, raw, now = Date.now()) {
       raw.mobilizationId ?? raw.queueId ?? raw.entryId,
     );
   } else if (action === "buyUnit") {
-    if (!isExpansion(g))
-      throw new GameError("즉시 유닛 구매는 확장 규칙 경기에서만 사용할 수 있어요.");
     if (isSupplyOn(g) && military({ type: raw.type }))
       throw new GameError(
         "상세 보급 ON에서는 전투 병종을 즉시 구매할 수 없고 도시별 동원 대기를 사용해요.",
@@ -4411,7 +4398,7 @@ export function transact(g, player, raw, now = Date.now()) {
       city = g.cities.find(
         (candidate) => candidate.id === raw.cityId && candidate.owner === player,
       ),
-      definition = city && Object.hasOwn(TYPES, type)
+      definition = city && !city.camp && Object.hasOwn(TYPES, type)
         && !TYPES[type].internal ? productionType(type, city)
         : null,
       price = definition ? unitPurchasePrice(type, city) : Infinity,
@@ -4463,12 +4450,11 @@ export function transact(g, player, raw, now = Date.now()) {
     if (!rate) throw new GameError("거래할 식량 또는 자원을 선택해 주세요.");
     const city =
       raw.resource === "food"
-        ? g.cities.find((c) => c.id === raw.cityId && c.owner === player)
+        ? g.cities.find((c) => c.id === raw.cityId && c.owner === player && !c.camp)
         : null;
     if (raw.resource === "food" && !city)
       throw new GameError("식량을 거래할 아군 도시를 선택해 주세요.");
     if (
-      isExpansion(g) &&
       raw.resource === "food" &&
       !isSupplyOn(g)
     )
@@ -4490,7 +4476,6 @@ export function transact(g, player, raw, now = Date.now()) {
     if (
       action === "buy" &&
       city &&
-      isExpansion(g) &&
       isSupplyOn(g) &&
       stock + amount > cityFoodCapacity(city, economy(g, player).perCity.find((c) => c.id === city.id)?.militaryFood ?? 0)
     )
@@ -4608,6 +4593,8 @@ export function transact(g, player, raw, now = Date.now()) {
       !atWar(g, player, target)
     )
       throw new GameError("협상 가능한 교전 세력을 선택해 주세요.");
+    const peaceBlocked = peaceIssue(g, player, target);
+    if (peaceBlocked) throw new GameError(peaceBlocked);
     if (!Number.isInteger(gold) || gold < 0 || gold > g.gold[player])
       throw new GameError("지불 가능한 골드 금액을 입력해 주세요.");
     if (g.proposals.some((p) => pair(p.from, p.to) === pair(player, target)))
@@ -4659,11 +4646,12 @@ export function transact(g, player, raw, now = Date.now()) {
     )
       throw new GameError("응답 가능한 제안을 확인해 주세요.");
     if (action === "acceptPeace") {
+      const peaceBlocked = peaceIssue(g, p.from, p.to);
+      if (peaceBlocked) throw new GameError(peaceBlocked);
       if (
         !Number.isInteger(p.gold) ||
         p.gold < 0 ||
         !Object.hasOwn(g.gold, p.to) ||
-        g.gold[p.to] < p.gold ||
         !atWar(g, p.from, p.to)
       )
         throw new GameError("수락할 평화 제안이 더 이상 유효하지 않아요.");
@@ -4685,7 +4673,7 @@ export function transact(g, player, raw, now = Date.now()) {
     )
       throw new GameError("외교 대상을 확인해 주세요.");
     const k = pair(player, target);
-    if ((g.alliances[k] ?? 0) >= g.turn)
+    if ((g.alliances[k] ?? 0) > g.turn)
       throw new GameError("먼저 동맹을 파기해야 선전포고할 수 있어요.");
     if ((g.peaceUntil[k] ?? 0) >= g.turn)
       throw new GameError("평화 협정 기간에는 공격할 수 없어요.");
@@ -4725,7 +4713,9 @@ export function previewDeal(g, player, raw, now = Date.now()) {
     };
   }
 }
-function announceWar(g, from, to, { triggerGuarantees = true, reason = null } = {}) {
+function announceWar(g, from, to, { triggerGuarantees = true, reason = null, expandAlliances = true } = {}) {
+  const consequence = applyWarDiplomacy(g, from, to, { reason, expandAlliances });
+  reason = consequence.reason;
   if (g.openBorders) {
     delete g.openBorders[`${from}>${to}`];
     delete g.openBorders[`${to}>${from}`];
@@ -4733,18 +4723,31 @@ function announceWar(g, from, to, { triggerGuarantees = true, reason = null } = 
   const text =
     reason === "guarantee"
       ? `${factionMap(g)[from].name}이 독립보장 의무로 ${factionMap(g)[to].name}과의 전쟁에 참전했습니다.`
-      : `${factionMap(g)[from].name}이 ${factionMap(g)[to].name}에 전쟁을 선포했습니다.`;
+      : reason === "alliance"
+        ? `${factionMap(g)[from].name}이 동맹 의무로 ${factionMap(g)[to].name}과의 전쟁에 참전했습니다.`
+        : `${factionMap(g)[from].name}이 ${factionMap(g)[to].name}에 ${consequence.justified ? "명분 있는" : "기습"} 전쟁을 선포했습니다.`;
   g.announcements = [
     ...(g.announcements ?? []),
     { id: randomUUID(), type: "war", from, to, text, turn: g.turn, ...(reason ? { reason } : {}) },
   ].slice(-8);
   event(g, factionIds(g), text, { type: "war", from, to, ...(reason ? { reason } : {}) });
+  for (const edge of consequence.brokenAlliances)
+    event(g, factionIds(g), `교차 동맹 ${edge}이 전쟁 참전 의무 충돌로 해제됐어요.`);
+  for (const joined of consequence.newWars)
+    announceWar(g, joined.from, joined.to, { reason: "alliance", expandAlliances: false });
   if (triggerGuarantees)
     onWarDeclared(g, from, to, {
       turn: g.turn,
       atWar,
       emit: (game, players, message, extra) => event(game, players, message, extra),
     });
+}
+function enforceAllianceWars(g) {
+  const result = syncAllianceWars(g);
+  for (const edge of result.brokenAlliances)
+    event(g, factionIds(g), `교차 동맹 ${edge}이 전쟁 참전 의무 충돌로 해제됐어요.`);
+  for (const war of result.newWars)
+    announceWar(g, war.from, war.to, { reason: "alliance", expandAlliances: false });
 }
 function refundProposal(g, p) {
   if (p.kind === "deal") {
@@ -4760,7 +4763,7 @@ function diplomaticAction(g, player, raw) {
       g,
       player,
       { ...raw, observation: observe(g, player) },
-      { GameError, event, atWar, relation, announceWar, npcWarRisk },
+      { GameError, event, atWar, relation, announceWar, npcWarRisk, razeCity },
     )
   ) {
     checkVictory(g);
@@ -4792,16 +4795,18 @@ function diplomaticAction(g, player, raw) {
         g.relations[pair(p.from, p.to)] =
           (g.relations[pair(p.from, p.to)] ?? 0) + 10;
       } else if (p.kind === "alliance") {
-        if (atWar(g, p.from, p.to))
-          throw new GameError("전쟁 중에는 동맹을 맺을 수 없어요.");
+        if (atWar(g, p.from, p.to) || (g.denouncements?.[pair(p.from,p.to)] ?? 0) > g.turn)
+          throw new GameError("전쟁·공개비난 중에는 동맹을 맺을 수 없어요.");
         g.alliances[pair(p.from, p.to)] = g.turn + 10;
         g.relations[pair(p.from, p.to)] = 30;
+        enforceAllianceWars(g);
       } else if (p.kind === "peace" || !p.kind) {
+        const peaceBlocked = peaceIssue(g,p.from,p.to);
+        if (peaceBlocked) throw new GameError(peaceBlocked);
         if (
           !Number.isInteger(p.gold) ||
           p.gold < 0 ||
           !Object.hasOwn(g.gold, p.to) ||
-          g.gold[p.to] < p.gold ||
           !atWar(g, p.from, p.to)
         )
           throw new GameError("수락할 평화 제안이 더 이상 유효하지 않아요.");
@@ -4831,11 +4836,11 @@ function diplomaticAction(g, player, raw) {
   if (action === "denounce") {
     if (relation(g, player, target) === "alliance")
       throw new GameError("동맹 파기 후 공개비난할 수 있어요.");
-    g.denouncements[k] = g.turn + 10;
+    recordDenouncement(g, player, target);
     g.relations[k] = -30;
     event(
       g,
-      [player, target],
+      factionIds(g),
       `${factionMap(g)[player].name}이 ${factionMap(g)[target].name}을 공개비난했어요. (10턴)`,
     );
     return true;
@@ -4875,7 +4880,7 @@ function diplomaticAction(g, player, raw) {
   if (g.proposals.some((p) => pair(p.from, p.to) === k))
     throw new GameError("진행 중인 제안에 먼저 응답해 주세요.");
   if (action === "alliance") {
-    if (["alliance", "denounced"].includes(relation(g, player, target)))
+    if (relation(g, player, target) === "denounced")
       throw new GameError("현재 관계에서는 동맹을 요청할 수 없어요.");
     if (human) {
       const proposal = {
@@ -4897,6 +4902,7 @@ function diplomaticAction(g, player, raw) {
         gold: 0,
       };
       g.alliances[k] = g.turn + 10;
+      enforceAllianceWars(g);
       notifyTrade(g, proposal, "accepted");
       event(
         g,

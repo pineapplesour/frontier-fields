@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { FACTIONS, RESOURCES } from "../shared/rules.js";
 import { DealSummary } from "./DealBuilder.jsx";
 import { Icon } from "./Icons.jsx";
+import { ultimatumDescription, ultimatumAcceptanceLabel, isTerritorialUltimatum } from "./territorialDiplomacy.js";
 import {
   appendNoticeUpdates,
   initialNoticeState,
@@ -21,7 +22,7 @@ const factionName = (id) => FACTIONS[id]?.name ?? id ?? "알 수 없는 문명";
 
 function proposalDescription(proposal) {
   if (!proposal) return "거래 조건을 확인해 주세요.";
-  if (proposal.kind === "ultimatum") return `금 요구 최후통첩 · ${proposal.gold}G 지급 요구 · ${proposal.expires}턴까지 응답 · 거절·미응답 시 자동 전쟁 없음`;
+  if (proposal.kind === "ultimatum") return `${ultimatumDescription(proposal)} · ${proposal.expires}턴까지 응답 · ${isTerritorialUltimatum(proposal) ? "거절·만료 시 전쟁 명분 획득 · " : ""}자동 개전 없음`;
   if (proposal.kind === "trade")
     return `${RESOURCES[proposal.resource]?.name ?? proposal.resource} ${proposal.amount ?? 0}개 · ${proposal.gold ?? 0}G`;
   if (proposal.kind === "alliance") return "10턴 동맹 제안";
@@ -50,6 +51,7 @@ export function TradeNotice({
   const [notice, setNotice] = useState(null);
   const [portalHost, setPortalHost] = useState(document.body);
   const [responding, setResponding] = useState(false);
+  const [confirmResponse, setConfirmResponse] = useState(null);
 
   const dismiss = () => {
     noticeRef.current = null;
@@ -57,6 +59,7 @@ export function TradeNotice({
     noticeRef.current = queued;
     setNotice(queued);
     setResponding(false);
+    setConfirmResponse(null);
   };
 
   useEffect(() => {
@@ -123,6 +126,10 @@ export function TradeNotice({
   const key = noticeKey(notice) ?? notice.id ?? proposal.id;
   const respond = async (accepted) => {
     if (!actionable || disabled || responding) return;
+    if (accepted && isTerritorialUltimatum(proposal) && confirmResponse !== proposal.id) {
+      setConfirmResponse(proposal.id);
+      return;
+    }
     setResponding(true);
     const ok = await onTrade({
       action: responseAction(proposal, accepted),
@@ -146,7 +153,7 @@ export function TradeNotice({
           {notice.turn ? `${notice.turn}턴 · ` : ""}
           {factionName(proposal.from)} → {factionName(proposal.to)}
         </small>
-        <strong>{proposal.kind === "ultimatum" ? (statusNames[notice.status] ?? "거래 알림").replace("거래", "금 요구 최후통첩") : statusNames[notice.status] ?? "거래 알림"}</strong>
+        <strong>{proposal.kind === "ultimatum" ? (statusNames[notice.status] ?? "거래 알림").replace("거래", isTerritorialUltimatum(proposal) ? "국경 최후통첩" : "금 요구 최후통첩") : statusNames[notice.status] ?? "거래 알림"}</strong>
         <p>{proposalDescription(proposal)}</p>
         {proposal.kind === "deal" ? (
           <DealSummary
@@ -169,7 +176,7 @@ export function TradeNotice({
               disabled={disabled || responding}
               onClick={() => respond(true)}
             >
-              수락
+              {isTerritorialUltimatum(proposal) ? `${confirmResponse === proposal.id ? "확정: " : ""}${ultimatumAcceptanceLabel(proposal)}` : "수락"}
             </button>
             <button
               className="soft-button"

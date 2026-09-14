@@ -14,3 +14,18 @@ test("crowded city and unit nameplates remain independently clickable without ch
     for (const b of result.slice(i + 1)) assert.ok(Math.abs(a.x-b.x) >= (a.width+b.width)/2 || Math.abs(a.y-b.y) >= (a.height+b.height)/2, `${a.id} overlaps ${b.id}`);
   }
 });
+
+test("phone map picker reserves five 44px candidate targets before unit and city labels", () => {
+  const candidates = Array.from({ length: 5 }, (_, index) => ({ id: `tile-${index}`, priority: -1, x: 185 + index * 9, y: 220 + index * 4, width: 44, height: 50 }));
+  const labels = [...candidates,
+    { id: "unit", priority: 0, x: 190, y: 223, width: 76, height: 50 },
+    { id: "city", priority: 1, x: 190, y: 223, width: 100, height: 30 }];
+  const result = layoutMapLabels(labels, 366, 666);
+  assert.deepEqual(result.slice(0, 5).map((item) => item.id), candidates.map((item) => item.id));
+  for (const [index, target] of result.entries()) {
+    assert.ok(target.x >= target.width / 2 && target.x <= 366 - target.width / 2);
+    assert.ok(target.y >= target.height / 2 && target.y <= 666 - target.height / 2);
+    for (const other of result.slice(index + 1))
+      assert.ok(Math.abs(target.x - other.x) >= (target.width + other.width) / 2 || Math.abs(target.y - other.y) >= (target.height + other.height) / 2, `${target.id} overlaps ${other.id}`);
+  }
+});

@@ -28,6 +28,7 @@ const field = () => {
     cities: [],
     rivers: [],
     wars: ["p1|p2"],
+    warStarted: { "p1|p2": g.turn - 10 },
     activePlayer: "p1",
     deadline: null,
     practicePassAt: null,
@@ -298,6 +299,7 @@ test("NPC trade, alliance, peace, and rejection outcomes notify only both partie
   });
   trade(g, "p1", "alliance", { factionId: "p3" });
   g.wars.push("p1|p3");
+  g.warStarted["p1|p3"] = g.turn - 10;
   trade(g, "p1", "peace", { factionId: "p3", gold: 40 });
   trade(g, "p1", "offerTrade", {
     factionId: "p3",

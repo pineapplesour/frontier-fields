@@ -275,8 +275,10 @@ export const Board = memo(function Board(props) {
           p.z >= -1 && p.z <= 1 && Math.abs(p.x) < 1.12 && Math.abs(p.y) < 1.12;
         projected.push({ node, visible, x: ((p.x + 1) * rt.width) / 2, y: ((1 - p.y) * rt.height) / 2,
           width: node.offsetWidth || 32, height: (node.offsetHeight || 22) + 6,
-          priority: node.classList.contains("world-unit-label") ? 0 : 1,
-          arrange: node.matches(".world-city-label, .world-unit-label"),
+          // Candidate hit areas must not overlap at the default phone zoom.
+          // Reserve these first, then retain unit-before-city label priority.
+          priority: node.classList.contains("map-target-marker") ? -1 : node.classList.contains("world-unit-label") ? 0 : 1,
+          arrange: node.matches(".map-target-marker, .world-city-label, .world-unit-label"),
         });
       }
       const arranged = new Map(layoutMapLabels(projected.filter(item => item.visible && item.arrange), rt.width, rt.height).map(item => [item.node, item]));
@@ -764,7 +766,7 @@ export const Board = memo(function Board(props) {
       ) : null}
       <div className={`world-labels layer-${layer}`} ref={labels}>
         {mapPick ? pickCandidates.map((point) => (
-          <button key={`pick-${point.q},${point.r}`} className={`map-target-marker ${equal(point, mapPick.target) ? "picked" : ""}`} data-q={point.q} data-r={point.r} data-alt=".65" aria-label={`영토 ${point.q},${point.r} 선택`} aria-pressed={equal(point, mapPick.target)} onClick={() => onTile(point)}>{equal(point, mapPick.target) ? "✓" : "+"}</button>
+          <button key={`pick-${point.q},${point.r}`} className={`map-target-marker ${equal(point, mapPick.target) ? "picked" : ""}`} data-q={point.q} data-r={point.r} data-alt=".65" aria-label={`영토 ${point.q},${point.r} 선택`} aria-pressed={equal(point, mapPick.target)} onClick={() => onTile(point)}>{equal(point, mapPick.target) ? "✓" : `${point.q},${point.r}`}</button>
         )) : null}
         {routePlan.steps
           .filter((s) => s.endOfTurn)

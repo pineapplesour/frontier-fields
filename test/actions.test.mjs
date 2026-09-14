@@ -191,6 +191,8 @@ test("gold trades conserve stock, reject overdraft and remove only sold own unit
     gold = g.gold.p1,
     city = g.cities.find((c) => c.owner === "p1"),
     unit = g.units.find((u) => u.owner === "p1");
+  // Food trade needs the stored-food ledger in both basic and expanded games.
+  g.supplyMode = "on";
   transact(g, "p1", { turn: 1, action: "sell", resource: "iron", amount: 1 });
   assert.equal(g.gold.p1, gold + 7);
   assert.equal(g.stockpiles.p1.iron, 2);
@@ -257,6 +259,8 @@ test("human peace uses escrow and consent; decline and expiration return the exa
   const g = createGame(),
     gold = g.gold.p1;
   transact(g, "p1", { turn: 1, action: "declareWar", factionId: "p2" });
+  // Escrow/consent fixture: the independent ten-turn wartime lock has elapsed.
+  g.warStarted["p1|p2"] = g.turn - 10;
   transact(g, "p1", { turn: 1, action: "peace", factionId: "p2", gold: 30 });
   let p = g.proposals[0];
   assert.equal(g.gold.p1, gold - 30);
@@ -286,6 +290,7 @@ test("human peace uses escrow and consent; decline and expiration return the exa
   );
   const h = createGame();
   transact(h, "p1", { turn: 1, action: "declareWar", factionId: "p2" });
+  h.warStarted["p1|p2"] = h.turn - 10;
   transact(h, "p1", { turn: 1, action: "peace", factionId: "p2", gold: 30 });
   for (let i = 0; i < 3; i++) resolveTurn(h);
   assert.equal(h.proposals.length, 0);
@@ -302,6 +307,7 @@ test("independent faction, city-state and barbarians differ; peace prevents atta
     observe(g, "p1").factions.find((f) => f.id === "p3").hostile,
     true,
   );
+  g.warStarted["p1|p3"] = g.turn - 10;
   transact(g, "p1", { turn: 1, action: "peace", factionId: "p3", gold: 40 });
   assert.equal(
     observe(g, "p1").factions.find((f) => f.id === "p3").hostile,
@@ -342,7 +348,7 @@ test("60-second expiry settles only active city economy and switches to opponent
   assert.equal(g.activePlayer, "p2");
   assert.equal(g.turn, 1);
   assert.equal(g.deadline, 121000);
-  assert.equal(c.production, 6);
+  assert.equal(c.production, 5, "Builder production reserves 0.5 population before settlement");
   assert.equal(other.food, otherFood);
   assert.equal(u.charges, 2);
   assert.throws(() => submitOrders(g, "p1", { turn: 1, orders: [] }, 61001));
@@ -352,7 +358,7 @@ test("60-second expiry settles only active city economy and switches to opponent
   endTurn(g, 62000);
   assert.equal(g.activePlayer, "p1");
   assert.equal(g.turn, 2);
-  assert.equal(c.production, 6);
+  assert.equal(c.production, 5, "Opponent settlement must not replay the first city's production");
   assert.equal(u.charges, 2);
   assert.equal(u.movesLeft, TYPES.builder.movement);
 });

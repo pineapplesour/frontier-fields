@@ -79,7 +79,7 @@ test("both starts have equal economy, resources, unit mix and visible map size",
     b.tiles.filter((t) => t.visible).length,
   );
   assert.equal(a.cities[0].production, 0);
-  assert.equal(a.cities[0].productionRate, 6);
+  assert.equal(a.cities[0].productionRate, 7, "Initial production includes assigned citizens");
 });
 test("unseen enemy units, orders, stockpiles, changing improvements and seed never enter observations", () => {
   const g = createGame();
@@ -209,16 +209,18 @@ test("builder farms immediately change food, exhaust moves and spend a single ch
 test("resource facilities require matching owned deposits and generate strategic resources", () => {
   const g = createGame(),
     u = g.units.find((u) => u.owner === "p1" && u.type === "builder");
-  const deposit = g.tiles.find(
-    (t) => t.owner === "p1" && t.resource === "iron",
-  );
+  // Initial territory now has one ring; give this facility fixture an
+  // explicit connected owned deposit rather than relying on map expansion.
+  const city = g.cities.find((candidate) => candidate.owner === "p1");
+  const deposit = g.tiles.find((t) => t.owner === "p1" && !equal(t, city) && t.terrain === "plains");
+  Object.assign(deposit, { resource: "iron", farm: false, developed: false, cityId: city.id });
   u.q = deposit.q;
   u.r = deposit.r;
   command(g, u, "develop");
   resolveTurn(g);
   assert.equal(deposit.developed, true);
   assert.equal(u.charges, 2);
-  assert.equal(g.stockpiles.p1.iron, 4);
+  assert.equal(g.stockpiles.p1.iron, 5, "Facility base income plus assigned citizen resource bonus");
 });
 test("production reserves costs once, switching refunds, and unaffordable batches are atomic", () => {
   const g = createGame(),
@@ -275,7 +277,7 @@ test("population grows from surplus and raises production and capacity", () => {
   resolveTurn(g);
   const e = economy(g, "p1");
   assert.equal(c.population, 5);
-  assert.equal(e.production, 7);
+  assert.equal(e.production, 8, "Population growth and citizen production both contribute");
   assert.equal(e.capacity, 10);
 });
 test("equal brigades merge into a four-unit corps conserving damaged health and weighted experience in either order", () => {

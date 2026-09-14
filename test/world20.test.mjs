@@ -170,7 +170,7 @@ test("wall levels require population production, grant HP and city fire is visib
   const rate = observe(g, "p1").cities.find(
     (x) => x.id === c.id,
   ).productionRate;
-  assert.equal(rate, 6);
+  assert.equal(rate, 7, "Wall production includes assigned citizen production");
   for (let i = 0; i < 5; i++) round(g);
   assert.equal(c.wallLevel, 1);
   assert.equal(cityMaxHealth(c), 160);
@@ -248,7 +248,7 @@ test("forecast uses exact attack formula and shows hill, river, fortification, c
     2,
   );
 });
-test("camp destruction stops its spawn; observation-only NPCs develop farms and different production", () => {
+test("defeated camps remain capturable and keep adjacent spawns; observation-only NPCs develop farms and production", () => {
   const g = createGame(),
     camp = g.cities.find((c) => c.camp);
   g.units = g.units.filter((u) => !equal(u, camp));
@@ -263,10 +263,16 @@ test("camp destruction stops its spawn; observation-only NPCs develop farms and 
   );
   tile(g, a).terrain = "plains";
   order(g, a, "bombard", { target: { q: camp.q, r: camp.r } });
-  assert.ok(!g.cities.some((c) => c.id === camp.id));
-  assert.equal(tile(g, camp).camp, false);
+  assert.ok(g.cities.some((c) => c.id === camp.id));
+  assert.equal(camp.hp, 0, "Bombardment defeats the camp without erasing the site");
+  assert.equal(tile(g, camp).camp, true);
+  const occupier = addUnit(g, "p1", "spearman", neighbors(camp).find((p) => tile(g, p) && !g.units.some((u) => equal(u, p))));
+  tile(g, occupier).terrain = "plains";
+  order(g, occupier, "move", { target: { q: camp.q, r: camp.r } });
+  assert.equal(camp.owner, "p1", "Melee troops can occupy the defeated site");
+  assert.equal(tile(g, camp).owner, "p1");
   for (let i = 0; i < 5; i++) round(g);
-  assert.ok(!g.units.some((u) => u.owner === "barb" && equal(u.home, camp)));
+  assert.ok(g.units.some((u) => u.owner === "barb" && equal(u.home, camp)), "Occupied sites retain barbarian reinforcement pressure on surrounding neutral land");
   assert.ok(
     g.tiles.filter((t) => ["p3", "p4"].includes(t.owner) && t.farm).length > 4,
   );

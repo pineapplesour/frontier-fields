@@ -41,6 +41,7 @@ import {
   Rules,
   Penalties,
   Bar,
+  CampDetails,
 } from "./Panels.jsx";
 import { FeedbackContext } from "./feedback.js";
 import { SaveGames } from "./SaveGames.jsx";
@@ -247,7 +248,7 @@ export default function App() {
       return;
     const c = game.cities.find(
       (c) =>
-        c.owner === game.playerId &&
+        c.owner === game.playerId && !c.camp &&
         c.productionPending &&
         !promptedProduction.current.has(
           `${session?.matchId}:${c.id}:${c.lastProduction?.turn}`,
@@ -1377,6 +1378,8 @@ export default function App() {
                 onTrade={onTrade}
                 tradeDisabled={tradeDisabled}
               />
+            ) : city?.camp ? (
+              <CampDetails game={game} city={city} disabled={disabled} onTrade={onTrade} />
             ) : city ? (
               <>
             <CityFoodDetails city={city} game={game} />
@@ -1486,7 +1489,7 @@ export default function App() {
                   value={selectedCityFood?.progress ?? 0}
                   max={city.growthTarget}
                 />
-                {expansion && city.owner === game.playerId ? (
+                {city.owner === game.playerId ? (
                   <div className="trade-controls">
                     <label htmlFor="growth-target">
                       다음 성장 영토
@@ -1529,6 +1532,7 @@ export default function App() {
                   </div>
                 ) : null}
                 <Penalties entity={city} />
+                {city.owner === game.playerId ? <button className="danger-button full" disabled={disabled || !!city.razeIssue} title={city.razeIssue ?? "도시와 영토를 포기합니다. 마지막 도시라면 패배할 수 있어요."} onClick={() => setModal("razeCity")}>도시 자진 철거</button> : null}
               </>
             ) : tile ? (
               <p>
@@ -1538,7 +1542,19 @@ export default function App() {
             ) : null}
           </Modal>
         ) : null}
-        {modal === "production" && city ? (
+        {modal === "razeCity" && city ? (
+          <Modal title={`${city.name} · 자진 철거 확인`} onClose={() => setModal("details")}>
+            <p>{city.name} 도시를 자진 철거합니다. 이 도시와 도시 기능을 잃으며 되돌릴 수 없어요. 다른 내 도시가 이어받을 수 없는 영토는 해제됩니다. 수도도 철거할 수 있으며, 마지막 도시를 철거하면 패배할 수 있어요.</p>
+            <p>상대의 정착 최후통첩을 수락하려는 경우에는 외교 창에서 해당 최후통첩을 수락하세요. 그 수락에는 10턴 재정착 금지 조건도 함께 적용됩니다.</p>
+            <div className="time-presets">
+              <button className="danger-button" disabled={disabled || city.owner !== game.playerId || !!city.razeIssue} onClick={async () => {
+                if (await onTrade({ action: "razeCity", cityId: city.id })) { setModal(null); clear(); setToast("도시를 자진 철거했어요."); }
+              }}>도시 철거 확정</button>
+              <button onClick={() => setModal("details")}>취소 · 도시로 돌아가기</button>
+            </div>
+          </Modal>
+        ) : null}
+        {modal === "production" && city && !city.camp ? (
           <Modal title={`${city.name} · 생산`} onClose={() => setModal(null)}>
             <Production
               game={game}

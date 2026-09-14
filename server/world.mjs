@@ -103,7 +103,7 @@ export function populateWorld(g, random, addUnit, territory) {
       fertility: 3,
       resource: null,
     });
-    if (!c.camp) territory(g, c);
+    if (!c.camp) territory(g, c, { initial: true });
     return c;
   }
   for (const [owner, col, row, name] of starts) {
@@ -145,7 +145,7 @@ export function populateWorld(g, random, addUnit, territory) {
         fertility: resource === "horses" ? 2 : 1,
         farm: false,
       });
-    territory(g, c);
+    territory(g, c, { initial: true });
   }
   for (const [x, y, name] of [
     [9, 3, "금빛항"],

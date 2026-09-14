@@ -190,6 +190,8 @@ export function settlementIssue(view, u) {
   if (!t || !["plains", "hills"].includes(t.terrain)) return "탐사된 평지나 구릉지에 정착해 주세요.";
   if (t.owner && t.owner !== u.owner)
     return "다른 문명의 영토에는 정착할 수 없어요.";
+  if (territorialPactBlocks(view, u.owner, u))
+    return "최후통첩 합의 지역이에요. 10턴 동안 선전포고 없이 정착할 수 없어요.";
   if (view.cities.some((c) => distance(c, u) < 4))
     return "기존 도시에서 4칸 이상 떨어져야 해요.";
   return null;
@@ -382,6 +384,7 @@ export function territoryEntryAllowed(view, player, tile) {
   return !!war || (view.openBorders?.[`${tile.owner}>${player}`] ?? 0) > view.turn;
 }
 export function canCrossBorder(view, unit, from, to) {
+  if (TYPES[unit.type] && !isCivilian(unit) && territorialPactBlocks(view, unit.owner, to)) return false;
   const tile = view.tiles?.find(t => equal(t, to));
   if (territoryEntryAllowed(view, unit.owner, tile)) return true;
   const source = view.tiles?.find(t => equal(t, from));
@@ -404,6 +407,18 @@ export function canCrossBorder(view, unit, from, to) {
     }
   }
   return (distances.get(key(to)) ?? Infinity) < (distances.get(key(from)) ?? Infinity);
+}
+// The server stores the full protected zone; observations expose only known
+// zone tiles. Unknown geography never enters browser or NPC path previews.
+export function territorialPactBlocks(view, player, target) {
+  const agreements = view.territorialAgreements ?? view.territorialDiplomacy?.agreements ?? [];
+  return agreements.some(p => {
+    if (p.to !== player || p.until <= view.turn) return false;
+    const edge = [p.from, p.to].sort().join("|");
+    const war = (view.wars ?? []).includes(edge) ||
+      (view.conflicts ?? []).some(([a,b]) => [a,b].sort().join("|") === edge);
+    return !war && (p.fullZoneKeys ?? p.zoneKeys ?? []).includes(key(target));
+  });
 }
 /**
  * Cost of entering the destination of an adjacent edge. A river crossing is

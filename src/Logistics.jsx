@@ -199,7 +199,7 @@ export function ManpowerDetails({ city, game, disabled = false, onTrade, compact
       "cancelMobilizationQueue",
     ]);
   const canQueue =
-    game?.rulesVersion === "expansion-v1" &&
+    (game?.capabilities?.populationRules === true || game?.rulesVersion === "expansion-v1") &&
     detailedLogisticsState(game).enabled &&
     typeof onTrade === "function";
   return (
