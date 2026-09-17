@@ -322,16 +322,17 @@ test("Civ6 formations: 여단 +10 CS, 사단 +17 CS, 100 HP not pooled; pooled s
   assert.equal(twice.hp, 75);
 });
 
-test("Civ6 walls: wall HP 50/100/150, melee 15% / ranged 50% / bombard 100% vs walls, ranged 50% vs city HP, city CS = max(garrison, own), heal 20", () => {
+test("Civ6 walls: wall HP 100/200/300, melee 15% / ranged 50% / bombard 100% vs walls, ranged 40% vs city HP, city CS = max(garrison, own), heal 20", () => {
   const view = { tiles: [], units: [], cities: [], rivers: [] };
   const city = { id: "c", owner: "p2", q: 1, r: 0, hp: 160, wallLevel: 2, wallHp: 100, population: 4 };
-  assert.equal(CIV6.WALL_HP_PER_LEVEL, 50);
+  assert.equal(CIV6.WALL_HP_PER_LEVEL, 100);
+  assert.equal(CIV6.WALL_CS_PER_LEVEL, 5);
   assert.equal(CIV6.CITY_HEAL_PER_TURN, 20);
-  // Own CS: 20 + 3·pop + 3·wallLevel = 38.
-  assert.equal(cityStrength(view, city), 38);
+  // Own CS: 20 + 3·pop + 5·wallLevel = 20 + 12 + 10 = 42.
+  assert.equal(cityStrength(view, city), 42);
   const garrison = { id: "g", type: "spearman", owner: "p2", q: 1, r: 0, hp: 100, size: 4, xp: 0 };
-  assert.equal(cityStrength({ ...view, units: [garrison] }, city), 38); // 21 + 17 = 38 ties
-  garrison.fortified = true; // 44 > 38
+  assert.equal(cityStrength({ ...view, units: [garrison] }, city), 42); // walls still lead: 21 + 17 = 38
+  garrison.fortified = true; // 44 > 42
   assert.equal(cityStrength({ ...view, units: [garrison] }, city), 44);
   const mk = (type) => ({ id: type, type, owner: "p1", q: 0, r: 0, hp: 100, size: 1, xp: 0 });
   const melee = cityExchange(view, mk("spearman"), city);
@@ -346,7 +347,7 @@ test("Civ6 walls: wall HP 50/100/150, melee 15% / ranged 50% / bombard 100% vs w
   const rangedOpen = cityExchange(view, mk("musketeer"), open);
   const meleeOpen = cityExchange(view, mk("spearman"), open);
   assert.equal(rangedOpen.wallDamage, 0);
-  assert.equal(rangedOpen.bodyDamage, Math.round(rangedOpen.raw * 0.5));
+  assert.equal(rangedOpen.bodyDamage, Math.round(rangedOpen.raw * 0.4));
   assert.equal(meleeOpen.bodyDamage, meleeOpen.raw);
   // No single hit can exceed the pool it lands on.
   assert.ok(bombard.wallDamage <= 100);

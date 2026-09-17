@@ -141,6 +141,7 @@ import {
 } from "./economy.mjs";
 import { ammunitionPreview, settleAmmunitionUpkeep, mergeAmmunitionUpkeep } from "./upkeep.mjs";
 import { ensureLogisticsState, tickLogistics, publicLogisticsState, handleLogisticsAction, LOGISTICS_ACTIONS, LogisticsError, onSupplyModeChanged, merchantSummary, mergeUnitLogistics, captureCarrierCargo, demobilizeUnitLogistics, markCarrierDestroyed, createPillageCargo } from "./logistics.mjs";
+import { advanceTradeRoutes, publicTradeRoutes, startTradeRoute, stopTradeRoute, tradePayout, tradeRouteCandidates } from "./tradeRoutes.mjs";
 
 export class GameError extends Error {
   constructor(message, status = 400) {
@@ -824,6 +825,89 @@ function settleTerritory(g, player) {
   return dropped;
 }
 
+/**
+ * 2026-09-18 user-reported bug: "내 도시가 캡쳐당해도 도시랑 영토가 내꺼로 보임".
+ * Remembered map snapshots (`g.explored[player]`) and ghost city contacts are
+ * only refreshed while a player can currently see the tile or owns it, so a
+ * captured city kept rendering in the previous owner's colour forever.
+ * A capture/raze/demolition is public knowledge (it emits an event), so the
+ * remembered state of every player is republished here with the new ownership.
+ */
+function publishOwnershipChange(g, tiles, city = null, turn = g.turn) {
+  const list = Array.isArray(tiles) ? tiles : [];
+  for (const player of Object.keys(g.players ?? {})) {
+    const memory = g.explored?.[player];
+    if (memory)
+      for (const t of list) {
+        const record = memory[key(t)];
+        if (!record || typeof record !== "object") continue;
+        record.owner = t.owner ?? null;
+        record.cityId = t.cityId ?? null;
+        record.cityName = city?.name ?? null;
+        record.lastSeenTurn = turn;
+      }
+    const contacts = g.cityContacts?.[player];
+    if (!contacts) continue;
+    if (city && contacts[city.id]) {
+      contacts[city.id].owner = city.owner;
+      contacts[city.id].name = city.name;
+      contacts[city.id].population = city.population;
+      contacts[city.id].wallLevel = city.wallLevel ?? 0;
+      contacts[city.id].lastSeenTurn = turn;
+    }
+  }
+}
+
+/** Forget a demolished/razed city everywhere so no ghost marker survives. */
+function publishCityRemoval(g, city, tiles = [], turn = g.turn) {
+  for (const player of Object.keys(g.players ?? {})) {
+    const contacts = g.cityContacts?.[player];
+    if (contacts?.[city.id]) delete contacts[city.id];
+    const memory = g.explored?.[player];
+    if (memory)
+      for (const t of tiles) {
+        const record = memory[key(t)];
+        if (!record || typeof record !== "object") continue;
+        record.cityId = null;
+        record.cityName = null;
+        record.owner = t.owner ?? null;
+        record.lastSeenTurn = turn;
+      }
+  }
+}
+
+/**
+ * Repair remembered ownership for saves that predate the capture fix: a tile
+ * whose administering city changed hands still carries the old owner in the
+ * exploring player's memory, which is what made a captured city keep showing
+ * the loser's flag.  Only records whose administering city disagrees with the
+ * remembered owner are touched, so ordinary last-seen fog stays intact.
+ */
+export function repairRememberedOwnership(g) {
+  const cityById = new Map((g.cities ?? []).map((c) => [c.id, c]));
+  for (const player of Object.keys(g.players ?? {})) {
+    const memory = g.explored?.[player];
+    if (memory)
+      for (const record of Object.values(memory)) {
+        if (!record || typeof record !== "object" || !record.cityId) continue;
+        const city = cityById.get(record.cityId);
+        if (!city || record.owner === city.owner) continue;
+        record.owner = city.owner;
+        record.cityName = city.name;
+      }
+    const contacts = g.cityContacts?.[player];
+    if (contacts)
+      for (const [id, contact] of Object.entries(contacts)) {
+        const city = cityById.get(id);
+        if (!city || contact.owner === city.owner) continue;
+        contact.owner = city.owner;
+        contact.name = city.name;
+        contact.population = city.population;
+        contact.wallLevel = city.wallLevel ?? 0;
+      }
+  }
+}
+
 function razeCity(g, player, cityId) {
   const city = g.cities.find(c => c.id === cityId && c.owner === player && !c.camp);
   if (!city) throw new GameError("철거할 본인 도시를 확인해 주세요.");
@@ -835,6 +919,7 @@ function razeCity(g, player, cityId) {
   for (const t of affected) t.cityId = null;
   const dropped = settleTerritory(g, player);
   for (const u of g.units.filter(u => u.homeCityId === cityId)) u.homeCityId = null;
+  publishCityRemoval(g, city, affected);
   event(g, [...new Set([player, ...seenBy(g,city)])], `${city.name}을 자진 철거했어요. 도시 인구와 생산은 사라지고 군대는 남아요.${dropped.length ? ` 이어지지 않은 영토 ${dropped.length}칸은 무주지가 됐어요.` : ""}`);
 }
 
@@ -1620,6 +1705,10 @@ export function observe(g, player, now = Date.now()) {
     world: { width: WIDTH, height: HEIGHT, wrapX: false, wrapY: false },
     capabilities: { resourceConversion: true, logistics: true, encampment: true, tradingPost: true, populationRules: true, territorialDiplomacy: true },
     logistics,
+    tradeRoutes: publicTradeRoutes(g, player),
+    tradeCandidates: tradeRouteCandidates(g, player, {
+      atWar: (game, a, b) => atWar(game, a, b),
+    }),
     cargo: logistics.cargo,
     roads: logistics.roads,
     effectSerial: g.effectSerial,
@@ -2233,6 +2322,7 @@ export function restoreRuntimeGame(
     g.maxTurns = MAX_TURNS;
   }
   normalizeState(g);
+  repairRememberedOwnership(g);
   normalizeUnitManpower(g);
   ensureEconomyState(g);
   ensureTileFeatures(g);
@@ -3836,6 +3926,11 @@ function handleActions(g, scope = living(g), endTurn = false) {
       for (const t of g.tiles) if (t.cityId === c.id) t.owner = invader.owner;
       const lost = settleTerritory(g, old);
       const floating = settleTerritory(g, invader.owner);
+      // Republish remembered ownership so the loser's map and ghost city
+      // marker immediately show the capture instead of their own flag.
+      publishOwnershipChange(g, g.tiles.filter((t) => t.cityId === c.id), c);
+      if (lost.length || floating.length)
+        publishOwnershipChange(g, [...lost, ...floating], c);
       if (isExpansion(g)) g.founded[invader.owner] = true;
       const notes = [];
       if (transferred.length) notes.push(`영토 ${transferred.length}칸이 함께 넘어갔어요.`);
@@ -4197,6 +4292,20 @@ function settleLogisticsTurn(g, owner) {
   if (result.delivered.length) event(g, [owner], `화물 ${result.delivered.length}건이 목적지에 도착했어요.`);
   if (result.captured.length) event(g, [owner], `이동 중 화물 ${result.captured.length}건이 나포됐어요.`);
   if (result.lost.length) event(g, [owner], `화물 ${result.lost.length}건의 운송이 중단됐어요.`);
+  // Merchants shuttle on their own: each completed outbound leg pays gold that
+  // scales with the partner city's size, farms and resources.
+  const trade = advanceTradeRoutes(g, {
+    owner,
+    turn: g.turn,
+    atWar: (game, a, b) => atWar(game, a, b),
+  });
+  for (const entry of trade.paid)
+    event(
+      g,
+      [owner],
+      `${entry.partner.name} 교역 완료 · 골드 +${entry.gold} (왕복 ${entry.route.trips}회, 누적 +${entry.route.goldEarned})`,
+    );
+  for (const entry of trade.stopped) event(g, [owner], entry.reason);
 }
 
 export function supplyNetwork(g, player) {
@@ -4802,6 +4911,28 @@ export function transact(g, player, raw, now = Date.now()) {
   } else requirePlanning(g, player, raw.turn, now, ANY_TURN_TRADES.has(raw.action));
   const action = raw.action,
     amount = raw.amount ?? 1;
+  if (action === "startTradeRoute" || action === "stopTradeRoute") {
+    const result =
+      action === "startTradeRoute"
+        ? startTradeRoute(g, player, {
+            unitId: raw.unitId,
+            cityId: raw.cityId,
+            turn: g.turn,
+            atWar: (game, a, b) => atWar(game, a, b),
+          })
+        : stopTradeRoute(g, player, { unitId: raw.unitId, routeId: raw.routeId });
+    if (result.issue) throw new GameError(result.issue);
+    const partner = g.cities.find((c) => c.id === result.route?.partnerCityId) ?? null;
+    if (action === "startTradeRoute")
+      event(
+        g,
+        [player],
+        `${partner?.name ?? "도시"} 교역로를 열었어요 · 편도 ${result.route.legTurns}턴 · 왕복당 골드 +${tradePayout(g, player, partner)}`,
+      );
+    else event(g, [player], "교역로를 닫았어요.");
+    g.revision++;
+    return observe(g, player, now);
+  }
   if (Object.values(LOGISTICS_ACTIONS).includes(action)) {
     if (action === "queueMerchant")
       return submitOrders(g, player, { turn: g.turn, production: [{ cityId: raw.cityId, type: "merchant" }] }, now);

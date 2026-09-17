@@ -34,11 +34,11 @@ export const NPC_STRATEGY = Object.freeze({
   // --- pillage policy -------------------------------------------------------
   PILLAGE_HEAL: 50, // engine heals +50 HP on pillage/scorch
   SIEGE_HEAL_RATIO: 0.5, // siege mode: only a unit below this HP ratio pillages (for the heal)
-  STARVE_STRIKE_RATIO: 0.75, // strike < defense * ratio  => cannot take the city soon => starve mode
-  STRIKE_READY_RATIO: 1.0, // strike >= defense * ratio  => the army may show itself and assault
+  STARVE_STRIKE_RATIO: 0.6, // strike < defense * ratio  => cannot take the city soon => starve mode
+  STRIKE_READY_RATIO: 0.85, // strike >= defense * ratio  => the army may show itself and assault
   STRIKE_RADIUS: 5, // allies within this range of the target city count as the strike force
   RAID_RADIUS: 3, // enemy improvements within this range of the target city are its farmland
-  TARGET_CITY_RANGE: 7, // nearest hostile city within this range is the unit's war target
+  TARGET_CITY_RANGE: 9, // nearest hostile city within this range is the unit's war target
   RAID_MIN_HP_RATIO: 0.5, // a raider below this ratio stops raiding (it pillages only where it stands)
   RAID_APPROACH_DANGER_RATIO: 0.5, // approach step danger must stay below hp * ratio
   LETHAL_DANGER_RATIO: 0.6, // expected damage >= hp * ratio counts as lethal fire cover
@@ -65,8 +65,8 @@ export const NPC_STRATEGY = Object.freeze({
   CITY_VISION: 3, // enemy cities see this far (mirrors engine visibility)
   HIDE_PENALTY: 16, // rank penalty for standing in enemy vision while the strike is not ready
   STAGING_DISTANCE: 4, // offensive march stops on this ring around the objective (just outside city vision)
-  STAGING_MAX_TURNS: 3, // after this many war turns the army commits if it still has any edge
-  STRIKE_COMMIT_RATIO: 1.0, // "any edge" = strike >= garrison power (city hp excluded) * ratio
+  STAGING_MAX_TURNS: 2, // after this many war turns the army commits even without a clear edge
+  STRIKE_COMMIT_RATIO: 0.8, // "any edge" = strike >= garrison power (city hp excluded) * ratio
   RAID_RANGE: 4, // with no city target, raid enemy improvements within this range of the unit
   MERGE_MIN_ARMY: 2, // formations start as soon as two same-type battalions exist
   MERGE_MAX_DANGER_RATIO: 0.5, // no merging under fire heavier than hp * ratio
@@ -85,14 +85,20 @@ export const NPC_STRATEGY = Object.freeze({
   ARMY_PER_CITY: 2, // baseline army size per city
   ARMY_POP_DIVISOR: 3, // plus one unit per this much population
   ARMY_PARITY_RATIO: 1.0, // keep army power >= strongest neighbour's visible power * ratio
-  NEIGHBOUR_RANGE: 8, // a civ with cities/units this close to ours is a neighbour
+  NEIGHBOUR_RANGE: 9, // a civ with cities/units this close to ours is a neighbour
   // --- offensives (never a warmonger) --------------------------------------
-  TEMPERAMENT: Object.freeze({ default: 0.3, p3: 0.35, p4: 0.3 }), // aggression 0..1
-  OFFENSE_ADVANTAGE_BASE: 1.6, // required own/their power ratio at aggression 1
-  OFFENSE_ADVANTAGE_SCALE: 0.8, // added requirement per (1 - aggression)
+  // 2026-09-18 user request: "왜 적들이 도시를 공격 안하지? 전략적으로 도시를
+  // 포위 공세하려고를 안하네" — NPC civilizations now weigh a city siege as a
+  // first-class plan instead of waiting for a 2x+ power advantage.
+  TEMPERAMENT: Object.freeze({ default: 0.55, p3: 0.6, p4: 0.55, p5: 0.55 }), // aggression 0..1
+  OFFENSE_ADVANTAGE_BASE: 1.25, // required own/their power ratio at aggression 1
+  OFFENSE_ADVANTAGE_SCALE: 0.6, // added requirement per (1 - aggression)
   CITY_DEFENSE_WEIGHT: 0.4, // city hp + wall hp counted at this weight in their power
   EXPOSED_IMPROVEMENTS_MIN: 2, // exposed enemy farms/resources needed for an economic casus belli
-  MIN_OFFENSIVE_ARMY: 5,
+  // A city that is weakly held is itself a casus belli: sieges no longer need
+  // a perfectly adjacent border, only a reachable target city.
+  OFFENSIVE_CITY_REACH: 10,
+  MIN_OFFENSIVE_ARMY: 4,
   MIN_OFFENSIVE_POWER: 110,
 });
 const factionList = (view) =>
@@ -1375,13 +1381,21 @@ export function npcDiplomacy(view) {
         !c.camp &&
         cities.some((o) => distance(o, c) <= S.NEIGHBOUR_RANGE),
     );
+    // A field army can march further than a border skirmish: any enemy city a
+    // siege column can actually reach counts as a siege target.
+    const reachable = (view.cities ?? []).filter(
+      (c) =>
+        c.owner === f.id &&
+        !c.camp &&
+        cities.some((o) => distance(o, c) <= S.OFFENSIVE_CITY_REACH),
+    );
     const encroaching = theirUnits.filter((u) =>
       cities.some((c) => distance(c, u) < 3),
     );
-    if (!near.length && !encroaching.length) return null;
+    if (!near.length && !reachable.length && !encroaching.length) return null;
     const theirPower =
       theirUnits.reduce((n, u) => n + power(u), 0) +
-      near.reduce((n, c) => n + (c.hp ?? 0) + (c.wallHp ?? 0), 0) *
+      [...near, ...reachable].reduce((n, c) => n + (c.hp ?? 0) + (c.wallHp ?? 0), 0) *
         S.CITY_DEFENSE_WEIGHT;
     const exposed = tiles.filter(
       (t) =>
@@ -1393,8 +1407,18 @@ export function npcDiplomacy(view) {
     const weakGarrison = near.some(
       (c) => !theirUnits.some((u) => distance(u, c) <= 1),
     );
+    const weakReachable = reachable.some(
+      (c) => !theirUnits.some((u) => distance(u, c) <= 1),
+    );
     if (ownPower < theirPower * required) return null;
-    if (!(encroaching.length || weakGarrison || exposed >= S.EXPOSED_IMPROVEMENTS_MIN))
+    if (
+      !(
+        encroaching.length ||
+        weakGarrison ||
+        weakReachable ||
+        exposed >= S.EXPOSED_IMPROVEMENTS_MIN
+      )
+    )
       return null;
     const risk = npcWarRisk(view, f.id);
     // Public guarantees add a coalition and commitment penalty.  This uses

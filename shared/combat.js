@@ -150,12 +150,16 @@ export const CIV6 = Object.freeze({
   VETERAN_PER_LEVEL: 1, // this game's XP levels, +1 CS per level above 1
   CORPS_BONUS: 10, // 여단 (2 units)
   ARMY_BONUS: 17, // 사단 (4 units; legacy 3-unit formations too)
-  WALL_HP_PER_LEVEL: 50,
-  WALL_CS_PER_LEVEL: 3,
+  // 2026-09-18 user request: "성벽이 너무 약한듯 문명처럼 좀더 강하게".
+  // Wall HP and combat strength per level are doubled / raised so a walled city
+  // cannot be cracked in one or two hits, matching Civilization's feel where
+  // walls must be reduced before the city body is exposed.
+  WALL_HP_PER_LEVEL: 100,
+  WALL_CS_PER_LEVEL: 5,
   MELEE_VS_WALLS: 0.15,
   RANGED_VS_WALLS: 0.5,
   BOMBARD_VS_WALLS: 1,
-  RANGED_VS_CITY_HP: 0.5,
+  RANGED_VS_CITY_HP: 0.4,
   CITY_HEAL_PER_TURN: 20,
 });
 export const COMBAT_ROLL_MIN = CIV6.ROLL_MIN;

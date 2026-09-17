@@ -777,8 +777,12 @@ export function UnitDetails({
   onMerge,
   onTrade,
   tradeDisabled = disabled,
+  onTradeRoute = null,
+  onStopTradeRoute = null,
 }) {
   const def = TYPES[unit.type];
+  const tradeRoute =
+    (game.tradeRoutes ?? []).find((route) => route.merchantId === unit.id) ?? null;
   const tile = game.tiles.find((t) => key(t) === key(unit));
   const own = unit.owner === game.playerId;
   const resourceConversion =
@@ -798,6 +802,38 @@ export function UnitDetails({
   return (
     <>
       <p className="description">{def.description}</p>
+      {unit.type === "merchant" && own ? (
+        <div className="trade-route">
+          {tradeRoute ? (
+            <>
+              <p className="description">
+                <strong>{tradeRoute.partnerName}</strong> 교역로 · 왕복{" "}
+                {tradeRoute.trips}회 · 누적 +{tradeRoute.goldEarned}골드 · 회당 +
+                {tradeRoute.goldPerTrip}골드
+              </p>
+              <p className="fine-print">
+                {tradeRoute.phase === "outbound" ? "가는 길" : "돌아오는 길"}{" "}
+                {tradeRoute.progress}/{tradeRoute.legTurns}턴 · 자동 왕복 중
+              </p>
+              <button
+                className="text-button"
+                disabled={disabled}
+                onClick={() => onStopTradeRoute?.(unit)}
+              >
+                교역 중지
+              </button>
+            </>
+          ) : (
+            <button
+              className="primary full"
+              disabled={disabled}
+              onClick={() => onTradeRoute?.(unit)}
+            >
+              교역 시작 · 도시 선택
+            </button>
+          )}
+        </div>
+      ) : null}
       <p
         className="entity-allegiance"
         style={{ color: factionFor(game, unit.owner).color }}

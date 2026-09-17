@@ -177,6 +177,7 @@ export default function App() {
     setModal("diplomacy");
   };
   const [code, setCode] = useState("");
+  const [tradeUnitId, setTradeUnitId] = useState(null);
   const [toast, setToast] = useState("");
   const [pendingShot, setPendingShot] = useState(null);
   const [soundEnabled, setSoundEnabled] = useState(
@@ -1487,6 +1488,14 @@ export default function App() {
                 onMerge={() => setModal("merge")}
                 onTrade={onTrade}
                 tradeDisabled={tradeDisabled}
+                onTradeRoute={(merchant) => {
+                  setTradeUnitId(merchant.id);
+                  setModal("trade");
+                }}
+                onStopTradeRoute={async (merchant) => {
+                  if (await api.transact({ action: "stopTradeRoute", unitId: merchant.id }))
+                    setToast("교역로를 닫았어요.");
+                }}
               />
             ) : city?.camp ? (
               <CampDetails game={game} city={city} disabled={disabled} onTrade={onTrade} />
@@ -1946,6 +1955,49 @@ export default function App() {
             ) : (
               <p>방장이 시작하면 첫 턴이 열려요.</p>
             )}
+          </Modal>
+        ) : null}
+        {modal === "trade" ? (
+          <Modal title="교역 도시 선택" onClose={() => setModal(null)}>
+            <p className="description">
+              상인이 스스로 왕복해요. 상대 도시의 규모·농지·자원이 클수록 왕복당
+              골드가 커져요(내가 실제로 본 시설만 계산).
+            </p>
+            <div className="trade-candidates">
+              {(game.tradeCandidates ?? []).map((candidate) => (
+                <button
+                  key={candidate.cityId}
+                  className="lobby-status trade-candidate"
+                  disabled={busy || candidate.atWar}
+                  onClick={async () => {
+                    if (
+                      await api.transact({
+                        action: "startTradeRoute",
+                        unitId: tradeUnitId,
+                        cityId: candidate.cityId,
+                      })
+                    ) {
+                      setToast(`${candidate.name} 교역로를 열었어요.`);
+                      setModal(null);
+                    }
+                  }}
+                >
+                  <span>
+                    {candidate.name} ·{" "}
+                    {candidate.mine ? "내 도시" : candidate.owner} · 왕복당 +
+                    {candidate.goldPerTrip}골드
+                  </span>
+                  <span className="fine-print">
+                    인구 {candidate.population} · 농지 {candidate.farms} · 자원{" "}
+                    {candidate.resources} · 편도 {candidate.legTurns}턴
+                    {candidate.atWar ? " · 전쟁 중" : ""}
+                  </span>
+                </button>
+              ))}
+              {(game.tradeCandidates ?? []).length === 0 ? (
+                <p className="empty-state">아직 교역할 도시를 알지 못해요.</p>
+              ) : null}
+            </div>
           </Modal>
         ) : null}
         {modal === "join" ? (
