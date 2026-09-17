@@ -84,6 +84,21 @@ export function useGame() {
         try {
           saved = JSON.parse(sessionStorage.getItem(storageKey));
         } catch {}
+        // An invite link outranks whatever this tab was showing: opening a
+        // link is an explicit "join this seat" action, and the code is only
+        // in the URL on that first open (it is stripped right away).
+        if (linkedCode)
+          try {
+            const joined = await api("/join", { body: { code: linkedCode } });
+            if (active) adopt(joined);
+            return;
+          } catch (e) {
+            if (e.status !== 404) throw e;
+            if (active)
+              setError(
+                "초대 링크가 만료됐어요. 초대 코드는 한 번만 쓸 수 있어요.",
+              );
+          }
         if (saved) {
           try {
             const state = await api(`/matches/${saved.matchId}`, {
@@ -100,20 +115,6 @@ export function useGame() {
           } catch (e) {
             if (e.status !== 401) throw e;
           }
-        }
-        if (linkedCode) {
-          try {
-            const joined = await api("/join", { body: { code: linkedCode } });
-            if (active) adopt(joined);
-          } catch (e) {
-            if (active)
-              setError(
-                e.status === 404
-                  ? "초대 링크가 만료됐어요. 초대 코드는 한 번만 쓸 수 있어요."
-                  : e.message,
-              );
-          }
-          return;
         }
         const data = await api("/matches", { body: { mode: "practice" } });
         if (active) adopt(data);
