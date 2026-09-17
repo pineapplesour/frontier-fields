@@ -1763,6 +1763,18 @@ export default function App() {
                             사람에게 초대
                           </button>
                         ) : null}
+                        {game.playerId === "p1" && seat.id === "p1" && !invite ? (
+                          <button
+                            className="text-button"
+                            disabled={busy}
+                            onClick={async () => {
+                              if (await api.inviteSeat(seat.id))
+                                setToast("방장 재초대 코드를 만들었어요.");
+                            }}
+                          >
+                            방장 재초대
+                          </button>
+                        ) : null}
                         {invite ? (
                           <div className="invite-code">
                             <code>{invite}</code>
@@ -1786,7 +1798,8 @@ export default function App() {
                 </div>
                 <p className="fine-print">
                   방장 화면에만 좌석별 초대 코드가 보여요. 참가자는 자기 좌석과
-                  관측 가능한 지도만 받아요.
+                  관측 가능한 지도만 받아요. 방장도 자기 좌석 재초대 코드로
+                  다른 브라우저에서 복귀할 수 있어요.
                 </p>
               </>
             ) : session.inviteCode && !game.opponentConnected ? (
@@ -1810,6 +1823,45 @@ export default function App() {
                 <p className="fine-print">
                   대화 상대에게 이 코드를 전달하면 텍스트 API로 참가할 수
                   있어요.
+                </p>
+              </>
+            ) : null}
+            {!expansion && game.playerId === "p1" ? (
+              <>
+                <label className="input-label">방장 좌석 재초대</label>
+                {session.inviteCodes?.p1 ? (
+                  <div className="invite-code">
+                    <code>{session.inviteCodes.p1}</code>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(
+                            session.inviteCodes.p1,
+                          );
+                          setToast("방장 재초대 코드를 복사했어요.");
+                        } catch {
+                          setToast("코드를 선택해 복사해 주세요.");
+                        }
+                      }}
+                    >
+                      복사
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="text-button"
+                    disabled={busy}
+                    onClick={async () => {
+                      if (await api.inviteSeat("p1"))
+                        setToast("방장 재초대 코드를 만들었어요.");
+                    }}
+                  >
+                    방장 재초대 코드 만들기
+                  </button>
+                )}
+                <p className="fine-print">
+                  다른 브라우저·기기에서 방장으로 다시 들어올 때 쓰는 코드예요.
+                  코드를 사용하면 이전 방장 세션은 만료됩니다.
                 </p>
               </>
             ) : null}

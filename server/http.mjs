@@ -304,10 +304,16 @@ export function createApi({
       throw new GameError("방장만 참가 초대 코드를 만들 수 있어요.", 403);
     const seatId = req.body?.seatId,
       seat = req.match.game.players?.[seatId];
-    if (!seat || seatId === "p1" || seatId === "cs" || seatId === "barb")
+    if (!seat || seatId === "cs" || seatId === "barb")
       throw new GameError("초대할 문명 좌석을 확인해 주세요.");
+    // 2026-09-18 user request: the host seat itself can be re-invited, so a
+    // host who lost the browser session (new tunnel origin, other device,
+    // cleared storage) recovers it with a short code instead of the raw token.
+    // The seat-scoped invite is still created only by an authenticated host,
+    // so it never grants more authority than the caller already holds.
+    const hostSeat = seatId === "p1";
     const npcControlled = seat.controller === "npc" || seat.npc === true;
-    if (seat.connected && !npcControlled)
+    if (!hostSeat && seat.connected && !npcControlled)
       throw new GameError(
         "이미 참가한 사용자가 있는 좌석은 재초대할 수 없어요.",
         409,
@@ -315,10 +321,15 @@ export function createApi({
     const code = randomBytes(9).toString("base64url");
     req.match.invites ??= {};
     req.match.invites[seatId] = code;
-    req.match.tokens[seatId] = null;
-    seat.connected = false;
+    // A host re-invite is a pending hand-off: the current host session keeps
+    // working until the code is redeemed, and redemption in /api/join
+    // overwrites tokens.p1 so exactly one live host remains afterwards.
+    if (!hostSeat) {
+      req.match.tokens[seatId] = null;
+      seat.connected = false;
+    }
     req.match.game.revision++;
-    res.json({ seatId, inviteCode: code });
+    res.json({ seatId, inviteCode: code, host: hostSeat });
   });
   app.post("/api/matches/:id/claim-npc", authenticated, (req, res) => {
     if (req.player !== "p1")
