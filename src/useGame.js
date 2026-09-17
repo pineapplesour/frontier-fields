@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { readJoinCode, withoutJoinCode } from "./inviteLink.js";
 
 const apiOrigin = String(import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
 
@@ -64,6 +65,19 @@ export function useGame() {
   }
   useEffect(() => {
     let active = true;
+    // Invite link: "#join=<code>" joins that seat on load.  The code is a
+    // single-use capability, so it is taken out of the address bar right away.
+    const linkedCode = readJoinCode(
+      typeof window === "undefined" ? "" : window.location.href,
+    );
+    if (linkedCode)
+      try {
+        window.history.replaceState(
+          null,
+          "",
+          withoutJoinCode(window.location.href),
+        );
+      } catch {}
     (async () => {
       try {
         let saved;
@@ -86,6 +100,20 @@ export function useGame() {
           } catch (e) {
             if (e.status !== 401) throw e;
           }
+        }
+        if (linkedCode) {
+          try {
+            const joined = await api("/join", { body: { code: linkedCode } });
+            if (active) adopt(joined);
+          } catch (e) {
+            if (active)
+              setError(
+                e.status === 404
+                  ? "초대 링크가 만료됐어요. 초대 코드는 한 번만 쓸 수 있어요."
+                  : e.message,
+              );
+          }
+          return;
         }
         const data = await api("/matches", { body: { mode: "practice" } });
         if (active) adopt(data);

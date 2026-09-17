@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { inviteLinkFor } from "./inviteLink.js";
 import {
   TYPES,
   RESOURCES,
@@ -192,6 +193,27 @@ export default function App() {
   // Resume the audio context on the first pointer/keyboard gesture after
   // load, whichever element receives it.
   useEffect(() => installSoundUnlock(window), []);
+  // Invite-link landing: a duel that is still in the lobby opens its waiting
+  // room once, so opening a link leads straight to the seat view (the host
+  // sees 경기 시작, the guest sees 방장이 시작하면 첫 턴이 열려요).
+  const lobbyAutoOpened = useRef(null);
+  useEffect(() => {
+    if (!game || !session) return;
+    if (game.mode !== "duel" || game.phase !== "lobby") return;
+    if (lobbyAutoOpened.current === session.matchId) return;
+    lobbyAutoOpened.current = session.matchId;
+    setModal("lobby");
+  }, [game?.mode, game?.phase, session?.matchId]);
+  const copyInviteLink = async (inviteCode, label = "초대") => {
+    try {
+      await navigator.clipboard.writeText(
+        inviteLinkFor(window.location.origin, inviteCode),
+      );
+      setToast(`${label} 링크를 복사했어요.`);
+    } catch {
+      setToast("링크를 복사할 수 없어요. 코드를 직접 전달해 주세요.");
+    }
+  };
   const contact =
     selected?.kind === "contact"
       ? game?.contacts?.find((c) => c.id === selected.id)
@@ -1790,6 +1812,16 @@ export default function App() {
                             >
                               복사
                             </button>
+                            <button
+                              onClick={() =>
+                                copyInviteLink(
+                                  invite,
+                                  `${seat.name || seat.id} 초대`,
+                                )
+                              }
+                            >
+                              링크 복사
+                            </button>
                           </div>
                         ) : null}
                       </div>
@@ -1819,10 +1851,18 @@ export default function App() {
                   >
                     복사
                   </button>
+                  <button
+                    onClick={() =>
+                      copyInviteLink(session.inviteCode, "상대 초대")
+                    }
+                  >
+                    링크 복사
+                  </button>
                 </div>
                 <p className="fine-print">
                   대화 상대에게 이 코드를 전달하면 텍스트 API로 참가할 수
-                  있어요.
+                  있어요. ‘링크 복사’는 코드가 포함된 주소를 만들어 주므로
+                  상대가 열기만 하면 바로 참가해요.
                 </p>
               </>
             ) : null}
@@ -1846,6 +1886,13 @@ export default function App() {
                     >
                       복사
                     </button>
+                    <button
+                      onClick={() =>
+                        copyInviteLink(session.inviteCodes.p1, "방장 재초대")
+                      }
+                    >
+                      링크 복사
+                    </button>
                   </div>
                 ) : (
                   <button
@@ -1861,7 +1908,8 @@ export default function App() {
                 )}
                 <p className="fine-print">
                   다른 브라우저·기기에서 방장으로 다시 들어올 때 쓰는 코드예요.
-                  코드를 사용하면 이전 방장 세션은 만료됩니다.
+                  ‘링크 복사’로 만든 주소를 쓰면 열기만 하면 방장으로
+                  들어와요. 코드를 사용하면 이전 방장 세션은 만료됩니다.
                 </p>
               </>
             ) : null}
